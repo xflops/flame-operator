@@ -69,7 +69,7 @@ func (r *FlameClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		logger.Error(err, "Invalid FlameCluster spec")
 		// Update status to reflect validation error?
 		// For now, just log and return error (or requeue with delay)
-		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil // Don't crash loop on bad config
+		return ctrl.Result{}, nil
 	}
 
 	// 1. Generate ConfigMap from FlameCluster.spec

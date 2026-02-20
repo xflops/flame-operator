@@ -63,6 +63,7 @@ type ExecutorManagerSpec struct {
 	Image string `json:"image,omitempty"`
 
 	// Replicas is the number of executor manager replicas.
+	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Resources defines the compute resource requirements.
@@ -72,6 +73,7 @@ type ExecutorManagerSpec struct {
 	Shim string `json:"shim,omitempty"`
 
 	// MaxExecutors is the maximum number of executors per node.
+	// +kubebuilder:validation:Minimum=1
 	MaxExecutors int32 `json:"maxExecutors,omitempty"`
 }
 
