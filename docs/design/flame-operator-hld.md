@@ -75,15 +75,50 @@ kind: FlameCluster
 metadata:
   name: my-flame
 spec:
-  image: "xflops/flame:latest" # Image for both components
-  replicas: 3                  # Number of Executor Managers
+  # Per-component image configuration for independent versioning
   sessionManager:
-    resources: {}              # Resource requirements
+    image: "xflops/flame-session:v0.1.0"  # Use explicit version tags
+    resources: {}                          # Resource requirements
   executorManager:
-    resources: {}              # Resource requirements
+    image: "xflops/flame-executor:v0.1.0"  # Use explicit version tags
+    replicas: 3                            # Number of Executor Managers
+    resources: {}                          # Resource requirements
 status:
-  state: "Running"             # Pending, Running, Failed
-  readyReplicas: 3             # Current ready executors
+  # State reflects overall cluster health
+  # - Pending: Initial state, or Session Manager not yet ready
+  # - Running: Session Manager ready AND at least one Executor ready
+  # - Failed: Session Manager failed to start, or all Executors failed
+  state: "Running"
+  # Session Manager health
+  sessionManagerReady: true
+  # Executor health tracking
+  executorReplicas: 3          # Desired executor count
+  readyExecutorReplicas: 3     # Current ready executors
+  # Human-readable message for debugging
+  message: "All components healthy"
+```
+
+### 5.4 Service Discovery
+
+Executors discover the Session Manager via Kubernetes-native DNS:
+
+1. **Session Manager Service**: The operator creates a ClusterIP Service named `<cluster-name>-session-manager` in the same namespace.
+2. **DNS Resolution**: Executors connect to `<cluster-name>-session-manager.<namespace>.svc.cluster.local`.
+3. **Environment Variable Injection**: The operator injects `SESSION_MANAGER_ADDR` environment variable into Executor pods with the Service DNS name.
+
+**Example Service:**
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-flame-session-manager
+spec:
+  selector:
+    app: flame-session-manager
+    flame.xflops.io/cluster: my-flame
+  ports:
+    - port: 8080
+      targetPort: 8080
 ```
 
 ## 6. Alternatives Considered
@@ -98,14 +133,14 @@ status:
 
 | Risk | Impact | Mitigation |
 | :--- | :--- | :--- |
-| **Race Conditions** | Components might start before dependencies (e.g., Executor before Session Manager). | Use InitContainers or readiness probes to ensure Session Manager is reachable before Executors start work. |
+| **Race Conditions** | Executors might start before Session Manager is ready. | **Service Discovery + Readiness Gates**: (1) Executors discover Session Manager via Kubernetes Service DNS (`<cluster>-session-manager.<ns>.svc`). (2) Executor pods use an InitContainer that waits for Session Manager Service endpoint to be ready. (3) Session Manager Deployment has readiness probe; Service only routes to ready pods. This ensures Executors block until Session Manager is accepting connections. |
 | **Resource Contention** | Executors might consume all node resources. | Enforce resource requests/limits in the CRD and pass them to Deployments. |
 | **CRD Schema Changes** | Breaking changes in future versions. | Use API versioning (v1alpha1 -> v1beta1) and conversion webhooks if needed later. |
 
 ## 8. Success Metrics
 - A user can deploy a working cluster with `kubectl apply -f flame.yaml`.
-- Changing `spec.replicas` scales the Executor pods within seconds.
-- `kubectl get flamecluster` shows the correct status and replica count.
+- Changing `spec.executorManager.replicas` scales the Executor pods within seconds.
+- `kubectl get flamecluster` shows the correct status including both Session Manager and Executor health.
 
 ## 9. Out of Scope
 - **Advanced Networking**: Ingress or external access (MVP focuses on internal cluster).
