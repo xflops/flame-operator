@@ -18,10 +18,12 @@ Users manually create Pods and Services for these components. This MVP aims to r
 
 ## 4. Use Cases
 - **UC1: Deploy Flame Cluster**
-  - User applies a `FlameCluster` manifest.
+  - User applies a `FlameCluster` manifest with embedded configuration.
+  - Operator generates a ConfigMap from `FlameCluster.spec.config`.
   - Operator creates the Session Manager Pod and Service.
+  - Operator creates the Object Cache Service.
   - Operator creates the Executor Manager Pods.
-  - All Pods have `ownerReference` set to the `FlameCluster` CR.
+  - All resources have `ownerReference` set to the `FlameCluster` CR.
   - Status is updated to `Running`.
 
 - **UC2: Scale Executors**
@@ -30,11 +32,12 @@ Users manually create Pods and Services for these components. This MVP aims to r
 
 - **UC3: Delete Cluster**
   - User deletes the `FlameCluster` resource.
-  - Kubernetes garbage collector automatically deletes all child Pods and Services (via `ownerReference`).
+  - Kubernetes garbage collector automatically deletes all child resources (Pods, Services, ConfigMap) via `ownerReference`.
 
 - **UC4: Update Configuration**
-  - User updates the ConfigMap referenced by `FlameCluster`.
-  - Operator detects the change and recreates affected Pods with new configuration.
+  - User updates configuration fields in `FlameCluster.spec.config`.
+  - Operator regenerates the ConfigMap with new values.
+  - Operator recreates affected Pods with new configuration.
 
 ## 5. Proposed Solution
 
@@ -42,13 +45,15 @@ Users manually create Pods and Services for these components. This MVP aims to r
 
 The operator follows the standard Kubernetes Controller pattern, managing **raw v1.Pod resources** (not Deployments) with `ownerReference` for automatic garbage collection:
 
-1.  **CRD**: `FlameCluster` defines the spec.
-2.  **Controller**: Watches `FlameCluster` resources and owned Pods.
+1.  **CRD**: `FlameCluster` defines the spec including embedded configuration.
+2.  **Controller**: Watches `FlameCluster` resources and owned resources (Pods, Services, ConfigMap).
 3.  **Reconcile Loop**:
     - Check if `FlameCluster` exists.
-    - **Session Manager**: Ensure a single Pod exists with `ownerReference` to FlameCluster. Ensure a Service exists for internal communication.
+    - **ConfigMap**: Generate ConfigMap from `FlameCluster.spec.config` with `ownerReference`.
+    - **Session Manager**: Ensure a single Pod exists with `ownerReference` to FlameCluster.
+    - **Services**: Create Session Manager Service and Object Cache Service with `ownerReference`.
     - **Executor Manager**: Ensure N Pods exist (from CRD `replicas`) with `ownerReference` to FlameCluster.
-    - **Configuration**: Mount ConfigMap into Pods for runtime configuration.
+    - **Configuration Mount**: Mount operator-generated ConfigMap into all Pods.
     - **Status**: Update `FlameCluster` status based on Pod health.
 
 **Why v1.Pod instead of Deployment?**
@@ -63,91 +68,72 @@ graph TD
     User[User] -->|Apply YAML| API[K8s API Server]
     API -->|Watch Event| Controller[Flame Operator]
     Controller -->|Reconcile| API
+    Controller -->|Generate| CM[ConfigMap from spec.config]
     API -->|Create Pod| SM[Session Manager Pod]
     API -->|Create Pods| EM1[Executor Manager Pod 1]
     API -->|Create Pods| EM2[Executor Manager Pod N]
-    API -->|Create| SVC[Session Manager Service]
-    API -->|Create| CM[Configuration ConfigMap]
+    API -->|Create| SVC_SM[Session Manager Service]
+    API -->|Create| SVC_OC[Object Cache Service]
     
-    subgraph "OwnerReference"
-        SM -.->|owned by| FC[FlameCluster CR]
+    subgraph "OwnerReference (auto-cleanup)"
+        CM -.->|owned by| FC[FlameCluster CR]
+        SM -.->|owned by| FC
         EM1 -.->|owned by| FC
         EM2 -.->|owned by| FC
-        SVC -.->|owned by| FC
-        CM -.->|owned by| FC
+        SVC_SM -.->|owned by| FC
+        SVC_OC -.->|owned by| FC
     end
 ```
 
 
 ### 5.2 Configuration Management
 
-The Flame cluster requires runtime configuration for cluster settings, executor limits, and cache configuration. The operator manages this via **ConfigMap with CRD reference**.
+The Flame cluster requires runtime configuration for cluster settings, executor limits, and cache configuration. The operator manages this via **embedded configuration in CRD spec** with operator-generated ConfigMap.
 
 **Configuration Strategy:**
-1. **ConfigMap**: Configuration is stored in a Kubernetes ConfigMap
-2. **CRD Reference**: The `FlameCluster` spec references the ConfigMap by name
-3. **Volume Mount**: Operator mounts the ConfigMap into Pods at a well-known path
-4. **Change Detection**: Operator watches ConfigMap changes and triggers Pod recreation
+1. **Embedded in CRD**: All configuration is specified directly in `FlameCluster.spec.config`
+2. **Operator-Generated ConfigMap**: Operator generates a ConfigMap from spec values
+3. **Lifecycle Management**: ConfigMap is created, updated, and deleted with the FlameCluster
+4. **Volume Mount**: Operator mounts the generated ConfigMap into all Pods at `/etc/flame`
+5. **Change Detection**: Changes to `spec.config` trigger ConfigMap regeneration and Pod recreation
 
+**Benefits of Embedded Configuration:**
+- **Single source of truth**: All cluster configuration in one manifest
+- **Atomic updates**: Configuration changes are versioned with the FlameCluster
+- **No orphaned ConfigMaps**: Operator manages full lifecycle
+- **Validation**: CRD schema can validate configuration at admission time
+- **GitOps friendly**: Entire cluster state in one resource
 
-**Configuration Schema (flame-cluster.yaml):**
-```yaml
-cluster:
-  name: flame
-  endpoint: "http://flame-session-manager:8080"
-  slot: "cpu=1,mem=1g"
-  policy: priority
-  storage: sqlite://flame.db
-executors:
-  shim: host
-  limits:
-    max_executors: 10
-cache:
-  endpoint: "grpc://flame-executor-manager:9090"
-  network_interface: "eth0"
-  storage: "/var/lib/flame/cache"
-```
+**Configuration Fields (from flame-cluster.yaml schema):**
 
-**ConfigMap Example:**
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: my-flame-config
-data:
-  flame-cluster.yaml: |
-    cluster:
-      name: flame
-      endpoint: "http://my-flame-session-manager:8080"
-      slot: "cpu=1,mem=1g"
-      policy: priority
-      storage: sqlite://flame.db
-    executors:
-      shim: host
-      limits:
-        max_executors: 10
-    cache:
-      endpoint: "grpc://my-flame-executor-manager:9090"
-      network_interface: "eth0"
-      storage: "/var/lib/flame/cache"
-```
+| Section | Field | Description |
+|---------|-------|-------------|
+| `cluster` | `name` | Cluster identifier |
+| `cluster` | `endpoint` | Session Manager endpoint (auto-generated from Service) |
+| `cluster` | `slot` | Resource slot definition (e.g., "cpu=1,mem=1g") |
+| `cluster` | `policy` | Scheduling policy (e.g., "priority") |
+| `cluster` | `storage` | Storage backend URI |
+| `executors` | `shim` | Executor shim type (e.g., "host") |
+| `executors` | `limits.max_executors` | Maximum executor count |
+| `cache` | `endpoint` | Object cache endpoint (auto-generated from Service) |
+| `cache` | `network_interface` | Network interface for cache |
+| `cache` | `storage` | Cache storage path |
 
-**Configuration Propagation:**
-1. User creates/updates ConfigMap with Flame configuration
-2. User references ConfigMap in `FlameCluster.spec.configRef`
-3. Operator mounts ConfigMap as volume in Session Manager and Executor Pods
-4. On ConfigMap update, operator detects change via resource version and recreates Pods
+**Operator-Generated Values:**
+The operator automatically generates certain configuration values based on the cluster:
+- `cluster.endpoint`: Set to `http://<cluster>-session-manager:8080`
+- `cache.endpoint`: Set to `grpc://<cluster>-object-cache:9090`
 
 ### 5.3 Data Flow
-1.  User creates ConfigMap with Flame configuration.
-2.  User submits `FlameCluster` manifest (referencing ConfigMap) to K8s API.
-3.  Controller receives an event.
-4.  Controller fetches the `FlameCluster` object and referenced ConfigMap.
+1.  User submits `FlameCluster` manifest with embedded configuration to K8s API.
+2.  Controller receives an event.
+3.  Controller fetches the `FlameCluster` object.
+4.  Controller generates ConfigMap from `spec.config` with auto-populated endpoints.
 5.  Controller constructs desired `Pod` and `Service` objects with:
     - `ownerReference` pointing to FlameCluster
-    - ConfigMap mounted as volume
+    - Generated ConfigMap mounted as volume
 6.  Controller compares desired state with actual state in the cluster.
-7.  Controller applies changes (Create/Update/Delete Pods) to K8s API.
+7.  Controller applies changes (Create/Update/Delete) to K8s API.
 8.  K8s scheduler places Pods on nodes.
 9.  Controller updates `FlameCluster.status`.
 
@@ -161,19 +147,31 @@ kind: FlameCluster
 metadata:
   name: my-flame
 spec:
-  # Reference to ConfigMap containing flame-cluster.yaml
-  configRef:
-    name: my-flame-config        # ConfigMap name (required)
-    key: flame-cluster.yaml      # Key in ConfigMap (default: flame-cluster.yaml)
+  # Embedded configuration (operator generates ConfigMap from these values)
+  config:
+    cluster:
+      name: flame                           # Cluster identifier
+      # endpoint: auto-generated from Service DNS
+      slot: "cpu=1,mem=1g"                  # Resource slot definition
+      policy: priority                      # Scheduling policy
+      storage: sqlite://flame.db            # Storage backend
+    executors:
+      shim: host                            # Executor shim type
+      limits:
+        max_executors: 10                   # Maximum executor count
+    cache:
+      # endpoint: auto-generated from Service DNS
+      network_interface: "eth0"             # Network interface for cache
+      storage: "/var/lib/flame/cache"       # Cache storage path
   
   # Per-component configuration
   sessionManager:
-    image: "xflops/flame-session:v0.1.0"  # Use explicit version tags
-    resources: {}                          # Resource requirements
+    image: "xflops/flame-session:v0.1.0"    # Use explicit version tags
+    resources: {}                            # Resource requirements
   executorManager:
-    image: "xflops/flame-executor:v0.1.0"  # Use explicit version tags
-    replicas: 3                            # Number of Executor Manager Pods
-    resources: {}                          # Resource requirements
+    image: "xflops/flame-executor:v0.1.0"   # Use explicit version tags
+    replicas: 3                              # Number of Executor Manager Pods
+    resources: {}                            # Resource requirements
 status:
   # State reflects overall cluster health
   # - Pending: Initial state, or Session Manager Pod not yet ready
@@ -186,11 +184,44 @@ status:
   executorReplicas: 3          # Desired executor count
   readyExecutorReplicas: 3     # Current ready executor Pods
   # Configuration status
-  configGeneration: 1          # Tracks ConfigMap version for change detection
+  configGeneration: 1          # Tracks config version for change detection
   # Human-readable message for debugging
   message: "All components healthy"
 ```
 
+**Operator-Generated ConfigMap:**
+
+The operator generates a ConfigMap from `spec.config` with auto-populated Service endpoints:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-flame-config
+  ownerReferences:
+    - apiVersion: flame.xflops.io/v1alpha1
+      kind: FlameCluster
+      name: my-flame
+      uid: <flamecluster-uid>
+      controller: true
+      blockOwnerDeletion: true
+data:
+  flame-cluster.yaml: |
+    cluster:
+      name: flame
+      endpoint: "http://my-flame-session-manager:8080"  # Auto-generated
+      slot: "cpu=1,mem=1g"
+      policy: priority
+      storage: sqlite://flame.db
+    executors:
+      shim: host
+      limits:
+        max_executors: 10
+    cache:
+      endpoint: "grpc://my-flame-object-cache:9090"     # Auto-generated
+      network_interface: "eth0"
+      storage: "/var/lib/flame/cache"
+```
 
 **Pod with OwnerReference Example:**
 ```yaml
@@ -224,10 +255,14 @@ spec:
   volumes:
     - name: config
       configMap:
-        name: my-flame-config
+        name: my-flame-config  # Operator-generated ConfigMap
 ```
 
 ### 5.5 Service Discovery
+
+The operator creates and manages Services for inter-component communication. All Services have `ownerReference` to the FlameCluster for automatic cleanup.
+
+#### Session Manager Service
 
 Executors discover the Session Manager via Kubernetes-native DNS:
 
@@ -291,10 +326,10 @@ spec:
 
 **Service Discovery Summary:**
 
-| Service | DNS Name | Port | Environment Variable |
-|---------|----------|------|---------------------|
-| Session Manager | `<cluster>-session-manager.<ns>.svc.cluster.local` | 8080 (HTTP) | `SESSION_MANAGER_ADDR` |
-| Object Cache | `<cluster>-object-cache.<ns>.svc.cluster.local` | 9090 (gRPC) | `OBJECT_CACHE_ADDR` |
+| Service | DNS Name | Port | Environment Variable | Auto-Generated Config |
+|---------|----------|------|---------------------|----------------------|
+| Session Manager | `<cluster>-session-manager.<ns>.svc.cluster.local` | 8080 (HTTP) | `SESSION_MANAGER_ADDR` | `cluster.endpoint` |
+| Object Cache | `<cluster>-object-cache.<ns>.svc.cluster.local` | 9090 (gRPC) | `OBJECT_CACHE_ADDR` | `cache.endpoint` |
 
 ## 6. Alternatives Considered
 
@@ -304,8 +339,8 @@ spec:
 | **Manual Manifests** | No extra tooling required. | High operational burden; error-prone. | ❌ Rejected |
 | **Operator (Go/Kubebuilder)** | Full control, active reconciliation, extensible. | Development effort required. | ✅ Selected |
 | **Deployments** | Built-in rolling updates, ReplicaSet management. | Extra abstraction layer, less direct control over individual pods. | ❌ Rejected (Pods with ownerReference preferred) |
-| **Config in CRD spec** | Single source of truth. | Large configs bloat CRD, harder to manage. | ❌ Rejected |
-| **ConfigMap with reference** | Separation of concerns, easy to update, standard K8s pattern. | Requires watching additional resource. | ✅ Selected |
+| **ConfigMap with external reference** | Separation of concerns. | User must manage ConfigMap separately, risk of orphaned configs, two resources to manage. | ❌ Rejected |
+| **Config embedded in CRD spec** | Single source of truth, operator manages lifecycle, atomic updates, GitOps friendly. | Slightly larger CRD manifest. | ✅ Selected |
 
 
 ## 7. Risks & Mitigations
@@ -316,19 +351,21 @@ spec:
 | **Resource Contention** | Executors might consume all node resources. | Enforce resource requests/limits in the CRD and pass them to Pods. |
 | **CRD Schema Changes** | Breaking changes in future versions. | Use API versioning (v1alpha1 -> v1beta1) and conversion webhooks if needed later. |
 | **Pod Management Complexity** | Managing individual Pods is more complex than Deployments. | Operator handles all Pod lifecycle; status tracking simplified without ReplicaSet layer. |
-| **Configuration Drift** | ConfigMap changes not reflected in running Pods. | Operator watches ConfigMap, recreates Pods on change, tracks `configGeneration` in status. |
-| **Orphaned Resources** | Child resources not cleaned up on FlameCluster deletion. | All Pods and Services have `ownerReference` to FlameCluster; Kubernetes GC handles cleanup automatically. |
+| **Configuration Drift** | Configuration changes not reflected in running Pods. | Operator watches `spec.config` changes, regenerates ConfigMap, and recreates Pods. Tracks `configGeneration` in status. |
+| **Orphaned Resources** | Child resources not cleaned up on FlameCluster deletion. | All Pods, Services, and ConfigMap have `ownerReference` to FlameCluster; Kubernetes GC handles cleanup automatically. |
+| **Invalid Configuration** | User provides invalid config values. | CRD schema validation at admission time; operator validates before generating ConfigMap. |
 
 ## 8. Success Metrics
-- A user can deploy a working cluster with `kubectl apply -f flame.yaml`.
+- A user can deploy a working cluster with a single `kubectl apply -f flamecluster.yaml` (no separate ConfigMap needed).
 - Changing `spec.executorManager.replicas` scales the Executor pods within seconds.
-- `kubectl get flamecluster` shows the correct status including both Session Manager and Executor health.
-- Deleting `FlameCluster` automatically cleans up all Pods and Services (via ownerReference).
-- Updating ConfigMap triggers Pod recreation with new configuration.
+- Changing `spec.config` values triggers automatic ConfigMap regeneration and Pod recreation.
+- `kubectl get flamecluster` shows the correct status including Session Manager and Executor health.
+- Deleting `FlameCluster` automatically cleans up all Pods, Services, and ConfigMap (via ownerReference).
+- Services are automatically created with correct DNS names for inter-component communication.
 
 ## 9. Out of Scope
 - **Advanced Networking**: Ingress or external access (MVP focuses on internal cluster).
 - **Storage**: Persistent storage for Session Manager (state is ephemeral for MVP).
 - **Multi-cluster**: Federation or multi-cluster management.
 - **Metrics/Monitoring**: Prometheus integration (can be added later).
-- **Configuration Validation**: Schema validation of flame-cluster.yaml (can be added later).
+- **Configuration Validation**: Deep schema validation of config values beyond CRD types (can be added later).
