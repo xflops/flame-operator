@@ -89,6 +89,7 @@ The Flame cluster requires runtime configuration for cluster settings, executor 
 3. **Volume Mount**: Operator mounts the ConfigMap into Pods at a well-known path
 4. **Change Detection**: Operator watches ConfigMap changes and triggers Pod recreation
 
+
 **Configuration Schema (flame-cluster.yaml):**
 ```yaml
 cluster:
@@ -256,6 +257,45 @@ spec:
       targetPort: 8080
 ```
 
+#### Object Cache Service
+
+The operator also creates a ClusterIP Service for the object cache, enabling distributed caching across the cluster:
+
+1. **Object Cache Service**: The operator creates a ClusterIP Service named `<cluster-name>-object-cache` in the same namespace.
+2. **DNS Resolution**: Components connect to `<cluster-name>-object-cache.<namespace>.svc.cluster.local` for cache operations.
+3. **Environment Variable Injection**: The operator injects `OBJECT_CACHE_ADDR` environment variable into all Flame pods with the Service DNS name and gRPC port.
+
+**Example Object Cache Service:**
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-flame-object-cache
+  ownerReferences:
+    - apiVersion: flame.xflops.io/v1alpha1
+      kind: FlameCluster
+      name: my-flame
+      uid: <flamecluster-uid>
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  selector:
+    app: flame-executor-manager
+    flame.xflops.io/cluster: my-flame
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+```
+
+**Service Discovery Summary:**
+
+| Service | DNS Name | Port | Environment Variable |
+|---------|----------|------|---------------------|
+| Session Manager | `<cluster>-session-manager.<ns>.svc.cluster.local` | 8080 (HTTP) | `SESSION_MANAGER_ADDR` |
+| Object Cache | `<cluster>-object-cache.<ns>.svc.cluster.local` | 9090 (gRPC) | `OBJECT_CACHE_ADDR` |
+
 ## 6. Alternatives Considered
 
 | Option | Pros | Cons | Decision |
@@ -266,6 +306,7 @@ spec:
 | **Deployments** | Built-in rolling updates, ReplicaSet management. | Extra abstraction layer, less direct control over individual pods. | ❌ Rejected (Pods with ownerReference preferred) |
 | **Config in CRD spec** | Single source of truth. | Large configs bloat CRD, harder to manage. | ❌ Rejected |
 | **ConfigMap with reference** | Separation of concerns, easy to update, standard K8s pattern. | Requires watching additional resource. | ✅ Selected |
+
 
 ## 7. Risks & Mitigations
 
