@@ -31,32 +31,39 @@ import (
 )
 
 // FlameConfigYaml represents the flame-cluster.yaml configuration.
-// This struct provides type-safe YAML handling for ConfigMap data.
+// This struct matches the actual Flame configuration format from:
+// https://raw.githubusercontent.com/xflops/flame/refs/heads/main/ci/flame-cluster.yaml
 type FlameConfigYaml struct {
-	SessionManager  SessionManagerConfig  `yaml:"sessionManager"`
-	ObjectCache     ObjectCacheConfig     `yaml:"objectCache"`
-	ExecutorManager ExecutorManagerConfig `yaml:"executorManager"`
+	Cluster   ClusterConfig   `yaml:"cluster"`
+	Executors ExecutorsConfig `yaml:"executors"`
+	Cache     CacheConfig     `yaml:"cache"`
 }
 
-// SessionManagerConfig holds session manager configuration for the YAML config.
-type SessionManagerConfig struct {
+// ClusterConfig holds the cluster configuration section.
+type ClusterConfig struct {
+	Name     string `yaml:"name"`
 	Endpoint string `yaml:"endpoint"`
 	Slot     string `yaml:"slot,omitempty"`
 	Policy   string `yaml:"policy,omitempty"`
 	Storage  string `yaml:"storage,omitempty"`
 }
 
-// ObjectCacheConfig holds object cache configuration for the YAML config.
-type ObjectCacheConfig struct {
-	Endpoint         string `yaml:"endpoint"`
-	Storage          string `yaml:"storage,omitempty"`
-	NetworkInterface string `yaml:"networkInterface,omitempty"`
+// ExecutorsConfig holds the executors configuration section.
+type ExecutorsConfig struct {
+	Shim   string        `yaml:"shim,omitempty"`
+	Limits ExecutorLimits `yaml:"limits,omitempty"`
 }
 
-// ExecutorManagerConfig holds executor manager configuration for the YAML config.
-type ExecutorManagerConfig struct {
-	MaxExecutors int32  `yaml:"maxExecutors"`
-	Shim         string `yaml:"shim,omitempty"`
+// ExecutorLimits holds the executor limits configuration.
+type ExecutorLimits struct {
+	MaxExecutors int32 `yaml:"max_executors,omitempty"`
+}
+
+// CacheConfig holds the cache configuration section.
+type CacheConfig struct {
+	Endpoint         string `yaml:"endpoint"`
+	NetworkInterface string `yaml:"network_interface,omitempty"`
+	Storage          string `yaml:"storage,omitempty"`
 }
 
 // FlameClusterReconciler reconciles a FlameCluster object
@@ -104,8 +111,9 @@ func (r *FlameClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+
 	// 1. Generate ConfigMap from FlameCluster.spec
-	//    - Populate sessionManager.endpoint, objectCache.endpoint
+	//    - Populate cluster.endpoint, cache.endpoint
 	//    - Create/Update ConfigMap
 
 	// 2. Reconcile Session Manager
@@ -162,33 +170,37 @@ func (r *FlameClusterReconciler) updateStatusWithPatch(ctx context.Context, clus
 }
 
 // buildFlameConfigYaml creates a FlameConfigYaml struct from the FlameCluster spec.
-// This provides type-safe configuration generation for the ConfigMap.
+// This builds the configuration in the format expected by Flame:
+// https://raw.githubusercontent.com/xflops/flame/refs/heads/main/ci/flame-cluster.yaml
 func (r *FlameClusterReconciler) buildFlameConfigYaml(cluster *flamev1alpha1.FlameCluster) *FlameConfigYaml {
 	// Build service endpoints based on naming convention
 	sessionManagerEndpoint := fmt.Sprintf("http://%s-session-manager:8080", cluster.Name)
-	objectCacheEndpoint := fmt.Sprintf("http://%s-object-cache:8081", cluster.Name)
+	cacheEndpoint := fmt.Sprintf("grpc://%s-executor-manager:9090", cluster.Name)
 
 	config := &FlameConfigYaml{
-		SessionManager: SessionManagerConfig{
+		Cluster: ClusterConfig{
+			Name:     cluster.Name,
 			Endpoint: sessionManagerEndpoint,
 			Slot:     cluster.Spec.SessionManager.Slot,
 			Policy:   cluster.Spec.SessionManager.Policy,
 			Storage:  cluster.Spec.SessionManager.Storage,
 		},
-		ObjectCache: ObjectCacheConfig{
-			Endpoint:         objectCacheEndpoint,
-			Storage:          cluster.Spec.ObjectCache.Storage,
-			NetworkInterface: cluster.Spec.ObjectCache.NetworkInterface,
+		Executors: ExecutorsConfig{
+			Shim: cluster.Spec.ExecutorManager.Shim,
+			Limits: ExecutorLimits{
+				MaxExecutors: cluster.Spec.ExecutorManager.MaxExecutors,
+			},
 		},
-		ExecutorManager: ExecutorManagerConfig{
-			MaxExecutors: cluster.Spec.ExecutorManager.MaxExecutors,
-			Shim:         cluster.Spec.ExecutorManager.Shim,
+		Cache: CacheConfig{
+			Endpoint:         cacheEndpoint,
+			NetworkInterface: cluster.Spec.ObjectCache.NetworkInterface,
+			Storage:          cluster.Spec.ObjectCache.Storage,
 		},
 	}
 
 	// Set default max executors if not specified
-	if config.ExecutorManager.MaxExecutors == 0 {
-		config.ExecutorManager.MaxExecutors = 1
+	if config.Executors.Limits.MaxExecutors == 0 {
+		config.Executors.Limits.MaxExecutors = 1
 	}
 
 	return config

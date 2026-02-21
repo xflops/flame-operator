@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -92,7 +94,7 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 	tests := []struct {
 		name     string
 		cluster  *flamev1alpha1.FlameCluster
-		validate func(t *testing.T, config *FlameConfigYaml)
+		expected *FlameConfigYaml
 	}{
 		{
 			name: "basic config generation",
@@ -120,39 +122,25 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 					},
 				},
 			},
-			validate: func(t *testing.T, config *FlameConfigYaml) {
-				// Verify session manager config
-				if config.SessionManager.Endpoint != "http://test-cluster-session-manager:8080" {
-					t.Errorf("SessionManager.Endpoint = %v, want http://test-cluster-session-manager:8080", config.SessionManager.Endpoint)
-				}
-				if config.SessionManager.Slot != "cpu=1,mem=1g" {
-					t.Errorf("SessionManager.Slot = %v, want cpu=1,mem=1g", config.SessionManager.Slot)
-				}
-				if config.SessionManager.Policy != "priority" {
-					t.Errorf("SessionManager.Policy = %v, want priority", config.SessionManager.Policy)
-				}
-				if config.SessionManager.Storage != "sqlite://flame.db" {
-					t.Errorf("SessionManager.Storage = %v, want sqlite://flame.db", config.SessionManager.Storage)
-				}
-
-				// Verify object cache config
-				if config.ObjectCache.Endpoint != "http://test-cluster-object-cache:8081" {
-					t.Errorf("ObjectCache.Endpoint = %v, want http://test-cluster-object-cache:8081", config.ObjectCache.Endpoint)
-				}
-				if config.ObjectCache.Storage != "/tmp/cache" {
-					t.Errorf("ObjectCache.Storage = %v, want /tmp/cache", config.ObjectCache.Storage)
-				}
-				if config.ObjectCache.NetworkInterface != "eth0" {
-					t.Errorf("ObjectCache.NetworkInterface = %v, want eth0", config.ObjectCache.NetworkInterface)
-				}
-
-				// Verify executor manager config
-				if config.ExecutorManager.MaxExecutors != 4 {
-					t.Errorf("ExecutorManager.MaxExecutors = %v, want 4", config.ExecutorManager.MaxExecutors)
-				}
-				if config.ExecutorManager.Shim != "host" {
-					t.Errorf("ExecutorManager.Shim = %v, want host", config.ExecutorManager.Shim)
-				}
+			expected: &FlameConfigYaml{
+				Cluster: ClusterConfig{
+					Name:     "test-cluster",
+					Endpoint: "http://test-cluster-session-manager:8080",
+					Slot:     "cpu=1,mem=1g",
+					Policy:   "priority",
+					Storage:  "sqlite://flame.db",
+				},
+				Executors: ExecutorsConfig{
+					Shim: "host",
+					Limits: ExecutorLimits{
+						MaxExecutors: 4,
+					},
+				},
+				Cache: CacheConfig{
+					Endpoint:         "grpc://test-cluster-executor-manager:9090",
+					NetworkInterface: "eth0",
+					Storage:          "/tmp/cache",
+				},
 			},
 		},
 		{
@@ -172,10 +160,19 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 					},
 				},
 			},
-			validate: func(t *testing.T, config *FlameConfigYaml) {
-				if config.ExecutorManager.MaxExecutors != 1 {
-					t.Errorf("ExecutorManager.MaxExecutors = %v, want 1 (default)", config.ExecutorManager.MaxExecutors)
-				}
+			expected: &FlameConfigYaml{
+				Cluster: ClusterConfig{
+					Name:     "minimal-cluster",
+					Endpoint: "http://minimal-cluster-session-manager:8080",
+				},
+				Executors: ExecutorsConfig{
+					Limits: ExecutorLimits{
+						MaxExecutors: 1, // default value
+					},
+				},
+				Cache: CacheConfig{
+					Endpoint: "grpc://minimal-cluster-executor-manager:9090",
+				},
 			},
 		},
 	}
@@ -186,29 +183,36 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 			if config == nil {
 				t.Fatal("buildFlameConfigYaml() returned nil")
 			}
-			tt.validate(t, config)
+			// Use reflect.DeepEqual for robust struct comparison
+			if !reflect.DeepEqual(config, tt.expected) {
+				t.Errorf("buildFlameConfigYaml() mismatch:\ngot:  %+v\nwant: %+v", config, tt.expected)
+			}
 		})
 	}
 }
+
 
 func TestMarshalFlameConfig(t *testing.T) {
 	r := &FlameClusterReconciler{}
 
 	config := &FlameConfigYaml{
-		SessionManager: SessionManagerConfig{
+		Cluster: ClusterConfig{
+			Name:     "test-cluster",
 			Endpoint: "http://test-session-manager:8080",
 			Slot:     "cpu=2,mem=2g",
 			Policy:   "fifo",
 			Storage:  "sqlite://test.db",
 		},
-		ObjectCache: ObjectCacheConfig{
-			Endpoint:         "http://test-object-cache:8081",
+		Executors: ExecutorsConfig{
+			Shim: "container",
+			Limits: ExecutorLimits{
+				MaxExecutors: 8,
+			},
+		},
+		Cache: CacheConfig{
+			Endpoint:         "grpc://test-object-cache:9090",
 			Storage:          "/data/cache",
 			NetworkInterface: "eth1",
-		},
-		ExecutorManager: ExecutorManagerConfig{
-			MaxExecutors: 8,
-			Shim:         "container",
 		},
 	}
 
@@ -223,43 +227,31 @@ func TestMarshalFlameConfig(t *testing.T) {
 		t.Fatalf("yaml.Unmarshal() error = %v", err)
 	}
 
-	// Verify round-trip consistency
-	if parsed.SessionManager.Endpoint != config.SessionManager.Endpoint {
-		t.Errorf("Round-trip SessionManager.Endpoint = %v, want %v", parsed.SessionManager.Endpoint, config.SessionManager.Endpoint)
-	}
-	if parsed.SessionManager.Slot != config.SessionManager.Slot {
-		t.Errorf("Round-trip SessionManager.Slot = %v, want %v", parsed.SessionManager.Slot, config.SessionManager.Slot)
-	}
-	if parsed.ObjectCache.Endpoint != config.ObjectCache.Endpoint {
-		t.Errorf("Round-trip ObjectCache.Endpoint = %v, want %v", parsed.ObjectCache.Endpoint, config.ObjectCache.Endpoint)
-	}
-	if parsed.ObjectCache.Storage != config.ObjectCache.Storage {
-		t.Errorf("Round-trip ObjectCache.Storage = %v, want %v", parsed.ObjectCache.Storage, config.ObjectCache.Storage)
-	}
-	if parsed.ExecutorManager.MaxExecutors != config.ExecutorManager.MaxExecutors {
-		t.Errorf("Round-trip ExecutorManager.MaxExecutors = %v, want %v", parsed.ExecutorManager.MaxExecutors, config.ExecutorManager.MaxExecutors)
-	}
-	if parsed.ExecutorManager.Shim != config.ExecutorManager.Shim {
-		t.Errorf("Round-trip ExecutorManager.Shim = %v, want %v", parsed.ExecutorManager.Shim, config.ExecutorManager.Shim)
+	// Use reflect.DeepEqual for robust round-trip verification
+	if !reflect.DeepEqual(&parsed, config) {
+		t.Errorf("Round-trip mismatch:\ngot:  %+v\nwant: %+v", parsed, config)
 	}
 }
 
 func TestFlameConfigYamlOmitsEmptyFields(t *testing.T) {
 	r := &FlameClusterReconciler{}
 
-	// Config with some empty fields
+	// Config with some empty fields - only required fields set
 	config := &FlameConfigYaml{
-		SessionManager: SessionManagerConfig{
+		Cluster: ClusterConfig{
+			Name:     "test",
 			Endpoint: "http://test:8080",
-			// Slot, Policy, Storage are empty
+			// Slot, Policy, Storage are empty - should be omitted
 		},
-		ObjectCache: ObjectCacheConfig{
-			Endpoint: "http://cache:8081",
-			// Storage, NetworkInterface are empty
+		Executors: ExecutorsConfig{
+			// Shim is empty - should be omitted
+			Limits: ExecutorLimits{
+				MaxExecutors: 2,
+			},
 		},
-		ExecutorManager: ExecutorManagerConfig{
-			MaxExecutors: 2,
-			// Shim is empty
+		Cache: CacheConfig{
+			Endpoint: "grpc://cache:9090",
+			// Storage, NetworkInterface are empty - should be omitted
 		},
 	}
 
@@ -270,26 +262,69 @@ func TestFlameConfigYamlOmitsEmptyFields(t *testing.T) {
 
 	yamlStr := string(data)
 
-	// Verify that omitempty fields are not present when empty
-	// Note: We check that the YAML doesn't contain these as top-level keys with empty values
-	var parsed map[string]interface{}
+	// Verify that omitempty fields are NOT present in the YAML output when empty
+	omitEmptyFields := []string{
+		"slot:",
+		"policy:",
+		"storage:",      // in cluster section
+		"shim:",
+		"network_interface:",
+	}
+
+	for _, field := range omitEmptyFields {
+		if strings.Contains(yamlStr, field) {
+			t.Errorf("YAML output should not contain empty field %q, but got:\n%s", field, yamlStr)
+		}
+	}
+
+	// Verify required fields ARE present
+	requiredFields := []string{
+		"cluster:",
+		"name:",
+		"endpoint:",
+		"executors:",
+		"limits:",
+		"max_executors:",
+		"cache:",
+	}
+
+	for _, field := range requiredFields {
+		if !strings.Contains(yamlStr, field) {
+			t.Errorf("YAML output should contain required field %q, but got:\n%s", field, yamlStr)
+		}
+	}
+
+	// Verify the YAML is still valid and parseable
+	var parsed FlameConfigYaml
 	if err := yaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("yaml.Unmarshal() error = %v", err)
 	}
 
-	// The YAML should still be valid and parseable
-	if yamlStr == "" {
-		t.Error("marshalFlameConfig() returned empty string")
+	// Verify the parsed values match expected
+	if parsed.Cluster.Name != "test" {
+		t.Errorf("parsed.Cluster.Name = %v, want test", parsed.Cluster.Name)
+	}
+	if parsed.Cluster.Endpoint != "http://test:8080" {
+		t.Errorf("parsed.Cluster.Endpoint = %v, want http://test:8080", parsed.Cluster.Endpoint)
+	}
+	if parsed.Executors.Limits.MaxExecutors != 2 {
+		t.Errorf("parsed.Executors.Limits.MaxExecutors = %v, want 2", parsed.Executors.Limits.MaxExecutors)
+	}
+	if parsed.Cache.Endpoint != "grpc://cache:9090" {
+		t.Errorf("parsed.Cache.Endpoint = %v, want grpc://cache:9090", parsed.Cache.Endpoint)
 	}
 
-	// Verify required fields are present
-	if parsed["sessionManager"] == nil {
-		t.Error("sessionManager should be present in YAML output")
+	// Verify empty fields remain empty after round-trip
+	if parsed.Cluster.Slot != "" {
+		t.Errorf("parsed.Cluster.Slot should be empty, got %q", parsed.Cluster.Slot)
 	}
-	if parsed["objectCache"] == nil {
-		t.Error("objectCache should be present in YAML output")
+	if parsed.Cluster.Policy != "" {
+		t.Errorf("parsed.Cluster.Policy should be empty, got %q", parsed.Cluster.Policy)
 	}
-	if parsed["executorManager"] == nil {
-		t.Error("executorManager should be present in YAML output")
+	if parsed.Executors.Shim != "" {
+		t.Errorf("parsed.Executors.Shim should be empty, got %q", parsed.Executors.Shim)
+	}
+	if parsed.Cache.NetworkInterface != "" {
+		t.Errorf("parsed.Cache.NetworkInterface should be empty, got %q", parsed.Cache.NetworkInterface)
 	}
 }
