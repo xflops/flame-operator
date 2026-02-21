@@ -175,7 +175,7 @@ func (r *FlameClusterReconciler) updateStatusWithPatch(ctx context.Context, clus
 func (r *FlameClusterReconciler) buildFlameConfigYaml(cluster *flamev1alpha1.FlameCluster) *FlameConfigYaml {
 	// Build service endpoints based on naming convention
 	sessionManagerEndpoint := fmt.Sprintf("http://%s-session-manager:8080", cluster.Name)
-	cacheEndpoint := fmt.Sprintf("grpc://%s-executor-manager:9090", cluster.Name)
+	cacheEndpoint := fmt.Sprintf("grpc://%s-object-cache:9090", cluster.Name)
 
 	config := &FlameConfigYaml{
 		Cluster: ClusterConfig{

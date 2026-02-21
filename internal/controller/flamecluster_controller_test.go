@@ -137,7 +137,7 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 					},
 				},
 				Cache: CacheConfig{
-					Endpoint:         "grpc://test-cluster-executor-manager:9090",
+					Endpoint:         "grpc://test-cluster-object-cache:9090",
 					NetworkInterface: "eth0",
 					Storage:          "/tmp/cache",
 				},
@@ -171,7 +171,7 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 					},
 				},
 				Cache: CacheConfig{
-					Endpoint: "grpc://minimal-cluster-executor-manager:9090",
+					Endpoint: "grpc://minimal-cluster-object-cache:9090",
 				},
 			},
 		},
