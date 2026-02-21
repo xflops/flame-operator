@@ -25,9 +25,46 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 
 	flamev1alpha1 "github.com/xflops/flame-operator/api/v1alpha1"
 )
+
+// FlameConfigYaml represents the flame-cluster.yaml configuration.
+// This struct matches the actual Flame configuration format from:
+// https://raw.githubusercontent.com/xflops/flame/refs/heads/main/ci/flame-cluster.yaml
+type FlameConfigYaml struct {
+	Cluster   ClusterConfig   `yaml:"cluster"`
+	Executors ExecutorsConfig `yaml:"executors"`
+	Cache     CacheConfig     `yaml:"cache"`
+}
+
+// ClusterConfig holds the cluster configuration section.
+type ClusterConfig struct {
+	Name     string `yaml:"name"`
+	Endpoint string `yaml:"endpoint"`
+	Slot     string `yaml:"slot,omitempty"`
+	Policy   string `yaml:"policy,omitempty"`
+	Storage  string `yaml:"storage,omitempty"`
+}
+
+// ExecutorsConfig holds the executors configuration section.
+type ExecutorsConfig struct {
+	Shim   string        `yaml:"shim,omitempty"`
+	Limits ExecutorLimits `yaml:"limits,omitempty"`
+}
+
+// ExecutorLimits holds the executor limits configuration.
+type ExecutorLimits struct {
+	MaxExecutors int32 `yaml:"max_executors,omitempty"`
+}
+
+// CacheConfig holds the cache configuration section.
+type CacheConfig struct {
+	Endpoint         string `yaml:"endpoint"`
+	NetworkInterface string `yaml:"network_interface,omitempty"`
+	Storage          string `yaml:"storage,omitempty"`
+}
 
 // FlameClusterReconciler reconciles a FlameCluster object
 type FlameClusterReconciler struct {
@@ -66,12 +103,17 @@ func (r *FlameClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Defensive coding: Validate the spec before proceeding
 	if err := r.validateSpec(&flameCluster); err != nil {
 		logger.Error(err, "Invalid FlameCluster spec")
+		// Update status to reflect invalid spec
+		if statusErr := r.updateStatusWithPatch(ctx, &flameCluster, "Failed", err.Error()); statusErr != nil {
+			logger.Error(statusErr, "Failed to update status")
+		}
 		// Invalid spec is a user error, not a transient condition - don't requeue
 		return ctrl.Result{}, nil
 	}
 
+
 	// 1. Generate ConfigMap from FlameCluster.spec
-	//    - Populate sessionManager.endpoint, objectCache.endpoint
+	//    - Populate cluster.endpoint, cache.endpoint
 	//    - Create/Update ConfigMap
 
 	// 2. Reconcile Session Manager
@@ -109,6 +151,65 @@ func (r *FlameClusterReconciler) validateSpec(cluster *flamev1alpha1.FlameCluste
 		return fmt.Errorf("spec.executorManager.image is required")
 	}
 	return nil
+}
+
+// updateStatusWithPatch updates the FlameCluster status using Patch instead of Update.
+// Using Patch with MergeFrom is more resilient to concurrent modifications
+// and reduces conflict errors in high-concurrency scenarios.
+func (r *FlameClusterReconciler) updateStatusWithPatch(ctx context.Context, cluster *flamev1alpha1.FlameCluster, state, message string) error {
+	// Create a patch from the current state
+	patch := client.MergeFrom(cluster.DeepCopy())
+
+	// Update status fields
+	cluster.Status.State = state
+	cluster.Status.Message = message
+	cluster.Status.ObservedGeneration = cluster.Generation
+
+	// Apply the patch - only updates changed fields
+	return r.Status().Patch(ctx, cluster, patch)
+}
+
+// buildFlameConfigYaml creates a FlameConfigYaml struct from the FlameCluster spec.
+// This builds the configuration in the format expected by Flame:
+// https://raw.githubusercontent.com/xflops/flame/refs/heads/main/ci/flame-cluster.yaml
+func (r *FlameClusterReconciler) buildFlameConfigYaml(cluster *flamev1alpha1.FlameCluster) *FlameConfigYaml {
+	// Build service endpoints based on naming convention
+	sessionManagerEndpoint := fmt.Sprintf("http://%s-session-manager:8080", cluster.Name)
+	cacheEndpoint := fmt.Sprintf("grpc://%s-object-cache:9090", cluster.Name)
+
+	config := &FlameConfigYaml{
+		Cluster: ClusterConfig{
+			Name:     cluster.Name,
+			Endpoint: sessionManagerEndpoint,
+			Slot:     cluster.Spec.SessionManager.Slot,
+			Policy:   cluster.Spec.SessionManager.Policy,
+			Storage:  cluster.Spec.SessionManager.Storage,
+		},
+		Executors: ExecutorsConfig{
+			Shim: cluster.Spec.ExecutorManager.Shim,
+			Limits: ExecutorLimits{
+				MaxExecutors: cluster.Spec.ExecutorManager.MaxExecutors,
+			},
+		},
+		Cache: CacheConfig{
+			Endpoint:         cacheEndpoint,
+			NetworkInterface: cluster.Spec.ObjectCache.NetworkInterface,
+			Storage:          cluster.Spec.ObjectCache.Storage,
+		},
+	}
+
+	// Set default max executors if not specified
+	if config.Executors.Limits.MaxExecutors == 0 {
+		config.Executors.Limits.MaxExecutors = 1
+	}
+
+	return config
+}
+
+// marshalFlameConfig serializes the FlameConfigYaml to YAML bytes.
+// Returns the YAML content suitable for ConfigMap data.
+func (r *FlameClusterReconciler) marshalFlameConfig(config *FlameConfigYaml) ([]byte, error) {
+	return yaml.Marshal(config)
 }
 
 // SetupWithManager sets up the controller with the Manager.
