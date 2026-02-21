@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -67,9 +66,8 @@ func (r *FlameClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Defensive coding: Validate the spec before proceeding
 	if err := r.validateSpec(&flameCluster); err != nil {
 		logger.Error(err, "Invalid FlameCluster spec")
-		// Update status to reflect validation error?
-		// For now, just log and return error (or requeue with delay)
-		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil // Don't crash loop on bad config
+		// Invalid spec is a user error, not a transient condition - don't requeue
+		return ctrl.Result{}, nil
 	}
 
 	// 1. Generate ConfigMap from FlameCluster.spec

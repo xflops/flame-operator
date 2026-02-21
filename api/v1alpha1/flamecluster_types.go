@@ -63,6 +63,7 @@ type ExecutorManagerSpec struct {
 	Image string `json:"image,omitempty"`
 
 	// Replicas is the number of executor manager replicas.
+	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Resources defines the compute resource requirements.
@@ -72,6 +73,7 @@ type ExecutorManagerSpec struct {
 	Shim string `json:"shim,omitempty"`
 
 	// MaxExecutors is the maximum number of executors per node.
+	// +kubebuilder:validation:Minimum=1
 	MaxExecutors int32 `json:"maxExecutors,omitempty"`
 }
 
@@ -99,8 +101,8 @@ type FlameClusterStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Running;Failed
 	State string `json:"state,omitempty"`
 
-	// ConfigGeneration tracks config version for change detection
-	ConfigGeneration int64 `json:"configGeneration,omitempty"`
+	// ObservedGeneration reflects the generation of the most recently observed FlameClusterSpec.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Human-readable message for debugging
 	Message string `json:"message,omitempty"`
