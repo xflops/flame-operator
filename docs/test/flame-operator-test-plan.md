@@ -26,7 +26,7 @@
 ### Test Types
 - [x] Functional Testing (Positive/Negative)
 - [x] Integration Testing (K8s API interactions)
-- [x] Regression Testing (Not applicable for MVP)
+- [x] Regression Testing (Not applicable for MVP, but will be essential for future releases)
 - [ ] Performance Testing
 - [ ] Security Testing
 
@@ -95,8 +95,8 @@
 | Data Type | Description | Source |
 |-----------|-------------|--------|
 | Valid CR | Standard FlameCluster manifest | `examples/flame-cluster.yaml` |
-| Invalid CR | Manifest with missing fields | Created manually |
-| Update CR | Manifest with modified fields | Created manually |
+| Invalid CR | Manifest with missing fields | Example manifests in `examples/test/invalid/` directory |
+| Update CR | Manifest with modified fields | Example manifests in `examples/test/update/` directory |
 
 ## 6. Dependencies & Risks
 
