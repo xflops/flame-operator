@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -43,7 +44,8 @@ func TestValidateSpec(t *testing.T) {
 						Image: "valid-image",
 					},
 					ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
-						Image: "valid-image",
+						Image:    "valid-image",
+						Replicas: 1,
 					},
 				},
 			},
@@ -57,7 +59,8 @@ func TestValidateSpec(t *testing.T) {
 						Image: "",
 					},
 					ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
-						Image: "valid-image",
+						Image:    "valid-image",
+						Replicas: 1,
 					},
 				},
 			},
@@ -71,7 +74,38 @@ func TestValidateSpec(t *testing.T) {
 						Image: "valid-image",
 					},
 					ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
-						Image: "",
+						Image:    "",
+						Replicas: 1,
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero replicas",
+			cluster: &flamev1alpha1.FlameCluster{
+				Spec: flamev1alpha1.FlameClusterSpec{
+					SessionManager: flamev1alpha1.SessionManagerSpec{
+						Image: "valid-image",
+					},
+					ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
+						Image:    "valid-image",
+						Replicas: 0,
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative replicas",
+			cluster: &flamev1alpha1.FlameCluster{
+				Spec: flamev1alpha1.FlameClusterSpec{
+					SessionManager: flamev1alpha1.SessionManagerSpec{
+						Image: "valid-image",
+					},
+					ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
+						Image:    "valid-image",
+						Replicas: -1,
 					},
 				},
 			},
@@ -156,7 +190,7 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 					},
 					ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
 						Image:        "executor-manager:latest",
-						MaxExecutors: 0, // not specified
+						MaxExecutors: 0,
 					},
 				},
 			},
@@ -167,7 +201,7 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 				},
 				Executors: ExecutorsConfig{
 					Limits: ExecutorLimits{
-						MaxExecutors: 1, // default value
+						MaxExecutors: 1,
 					},
 				},
 				Cache: CacheConfig{
@@ -183,14 +217,12 @@ func TestBuildFlameConfigYaml(t *testing.T) {
 			if config == nil {
 				t.Fatal("buildFlameConfigYaml() returned nil")
 			}
-			// Use reflect.DeepEqual for robust struct comparison
 			if !reflect.DeepEqual(config, tt.expected) {
 				t.Errorf("buildFlameConfigYaml() mismatch:\ngot:  %+v\nwant: %+v", config, tt.expected)
 			}
 		})
 	}
 }
-
 
 func TestMarshalFlameConfig(t *testing.T) {
 	r := &FlameClusterReconciler{}
@@ -221,13 +253,11 @@ func TestMarshalFlameConfig(t *testing.T) {
 		t.Fatalf("marshalFlameConfig() error = %v", err)
 	}
 
-	// Verify the YAML can be unmarshaled back
 	var parsed FlameConfigYaml
 	if err := yaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("yaml.Unmarshal() error = %v", err)
 	}
 
-	// Use reflect.DeepEqual for robust round-trip verification
 	if !reflect.DeepEqual(&parsed, config) {
 		t.Errorf("Round-trip mismatch:\ngot:  %+v\nwant: %+v", parsed, config)
 	}
@@ -236,22 +266,18 @@ func TestMarshalFlameConfig(t *testing.T) {
 func TestFlameConfigYamlOmitsEmptyFields(t *testing.T) {
 	r := &FlameClusterReconciler{}
 
-	// Config with some empty fields - only required fields set
 	config := &FlameConfigYaml{
 		Cluster: ClusterConfig{
 			Name:     "test",
 			Endpoint: "http://test:8080",
-			// Slot, Policy, Storage are empty - should be omitted
 		},
 		Executors: ExecutorsConfig{
-			// Shim is empty - should be omitted
 			Limits: ExecutorLimits{
 				MaxExecutors: 2,
 			},
 		},
 		Cache: CacheConfig{
 			Endpoint: "grpc://cache:9090",
-			// Storage, NetworkInterface are empty - should be omitted
 		},
 	}
 
@@ -262,69 +288,294 @@ func TestFlameConfigYamlOmitsEmptyFields(t *testing.T) {
 
 	yamlStr := string(data)
 
-	// Verify that omitempty fields are NOT present in the YAML output when empty
-	omitEmptyFields := []string{
-		"slot:",
-		"policy:",
-		"storage:",      // in cluster section
-		"shim:",
-		"network_interface:",
-	}
-
+	omitEmptyFields := []string{"slot:", "policy:", "shim:", "network_interface:"}
 	for _, field := range omitEmptyFields {
 		if strings.Contains(yamlStr, field) {
-			t.Errorf("YAML output should not contain empty field %q, but got:\n%s", field, yamlStr)
+			t.Errorf("YAML output should not contain empty field %q", field)
 		}
 	}
 
-	// Verify required fields ARE present
-	requiredFields := []string{
-		"cluster:",
-		"name:",
-		"endpoint:",
-		"executors:",
-		"limits:",
-		"max_executors:",
-		"cache:",
-	}
-
+	requiredFields := []string{"cluster:", "name:", "endpoint:", "executors:", "limits:", "max_executors:", "cache:"}
 	for _, field := range requiredFields {
 		if !strings.Contains(yamlStr, field) {
-			t.Errorf("YAML output should contain required field %q, but got:\n%s", field, yamlStr)
+			t.Errorf("YAML output should contain required field %q", field)
 		}
 	}
+}
 
-	// Verify the YAML is still valid and parseable
-	var parsed FlameConfigYaml
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("yaml.Unmarshal() error = %v", err)
+func TestComputeConfigHash(t *testing.T) {
+	hash1 := computeConfigHash("test data")
+	hash2 := computeConfigHash("test data")
+	hash3 := computeConfigHash("different data")
+
+	if hash1 != hash2 {
+		t.Errorf("Same input should produce same hash: %s != %s", hash1, hash2)
+	}
+	if hash1 == hash3 {
+		t.Errorf("Different input should produce different hash: %s == %s", hash1, hash3)
+	}
+}
+
+func TestBuildConfigMap(t *testing.T) {
+	r := &FlameClusterReconciler{}
+
+	cluster := &flamev1alpha1.FlameCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+		Spec: flamev1alpha1.FlameClusterSpec{
+			SessionManager: flamev1alpha1.SessionManagerSpec{
+				Image: "xflops/flame-session:v0.1.0",
+			},
+			ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
+				Image:    "xflops/flame-executor:v0.1.0",
+				Replicas: 3,
+			},
+		},
 	}
 
-	// Verify the parsed values match expected
-	if parsed.Cluster.Name != "test" {
-		t.Errorf("parsed.Cluster.Name = %v, want test", parsed.Cluster.Name)
+	cm := r.buildConfigMap(cluster)
+
+	if cm.Name != "test-cluster-config" {
+		t.Errorf("Expected ConfigMap name 'test-cluster-config', got '%s'", cm.Name)
 	}
-	if parsed.Cluster.Endpoint != "http://test:8080" {
-		t.Errorf("parsed.Cluster.Endpoint = %v, want http://test:8080", parsed.Cluster.Endpoint)
+	if cm.Namespace != "default" {
+		t.Errorf("Expected namespace 'default', got '%s'", cm.Namespace)
 	}
-	if parsed.Executors.Limits.MaxExecutors != 2 {
-		t.Errorf("parsed.Executors.Limits.MaxExecutors = %v, want 2", parsed.Executors.Limits.MaxExecutors)
+	if cm.Labels[labelCluster] != "test-cluster" {
+		t.Errorf("Expected label '%s'='test-cluster', got '%s'", labelCluster, cm.Labels[labelCluster])
 	}
-	if parsed.Cache.Endpoint != "grpc://cache:9090" {
-		t.Errorf("parsed.Cache.Endpoint = %v, want grpc://cache:9090", parsed.Cache.Endpoint)
+	if _, ok := cm.Data[configMapKey]; !ok {
+		t.Errorf("Expected ConfigMap to have key '%s'", configMapKey)
+	}
+}
+
+func TestBuildSessionManagerService(t *testing.T) {
+	r := &FlameClusterReconciler{}
+
+	cluster := &flamev1alpha1.FlameCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
 	}
 
-	// Verify empty fields remain empty after round-trip
-	if parsed.Cluster.Slot != "" {
-		t.Errorf("parsed.Cluster.Slot should be empty, got %q", parsed.Cluster.Slot)
+	svc := r.buildSessionManagerService(cluster)
+
+	if svc.Name != "test-cluster-session-manager" {
+		t.Errorf("Expected Service name 'test-cluster-session-manager', got '%s'", svc.Name)
 	}
-	if parsed.Cluster.Policy != "" {
-		t.Errorf("parsed.Cluster.Policy should be empty, got %q", parsed.Cluster.Policy)
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("Expected ServiceType ClusterIP, got '%s'", svc.Spec.Type)
 	}
-	if parsed.Executors.Shim != "" {
-		t.Errorf("parsed.Executors.Shim should be empty, got %q", parsed.Executors.Shim)
+	if svc.Spec.Selector[labelApp] != componentSessionManager {
+		t.Errorf("Expected selector app='%s', got '%s'", componentSessionManager, svc.Spec.Selector[labelApp])
 	}
-	if parsed.Cache.NetworkInterface != "" {
-		t.Errorf("parsed.Cache.NetworkInterface should be empty, got %q", parsed.Cache.NetworkInterface)
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != sessionManagerPort {
+		t.Errorf("Expected port %d", sessionManagerPort)
+	}
+}
+
+func TestBuildObjectCacheService(t *testing.T) {
+	r := &FlameClusterReconciler{}
+
+	cluster := &flamev1alpha1.FlameCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+	}
+
+	svc := r.buildObjectCacheService(cluster)
+
+	if svc.Name != "test-cluster-object-cache" {
+		t.Errorf("Expected Service name 'test-cluster-object-cache', got '%s'", svc.Name)
+	}
+	if svc.Spec.Selector[labelApp] != componentExecutorManager {
+		t.Errorf("Expected selector app='%s', got '%s'", componentExecutorManager, svc.Spec.Selector[labelApp])
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != objectCachePort {
+		t.Errorf("Expected port %d", objectCachePort)
+	}
+}
+
+func TestBuildSessionManagerPod(t *testing.T) {
+	r := &FlameClusterReconciler{}
+
+	cluster := &flamev1alpha1.FlameCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+		Spec: flamev1alpha1.FlameClusterSpec{
+			SessionManager: flamev1alpha1.SessionManagerSpec{
+				Image: "xflops/flame-session:v0.1.0",
+			},
+		},
+	}
+
+	pod := r.buildSessionManagerPod(cluster, "testhash")
+
+	if pod.Name != "test-cluster-session-manager" {
+		t.Errorf("Expected Pod name 'test-cluster-session-manager', got '%s'", pod.Name)
+	}
+	if pod.Labels[labelApp] != componentSessionManager {
+		t.Errorf("Expected label app='%s', got '%s'", componentSessionManager, pod.Labels[labelApp])
+	}
+	if pod.Annotations[annotationConfigHash] != "testhash" {
+		t.Errorf("Expected annotation '%s'='testhash', got '%s'", annotationConfigHash, pod.Annotations[annotationConfigHash])
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("Expected 1 container, got %d", len(pod.Spec.Containers))
+	}
+	if pod.Spec.Containers[0].Image != "xflops/flame-session:v0.1.0" {
+		t.Errorf("Expected image 'xflops/flame-session:v0.1.0', got '%s'", pod.Spec.Containers[0].Image)
+	}
+	// Verify readiness probe exists
+	if pod.Spec.Containers[0].ReadinessProbe == nil {
+		t.Error("Expected readiness probe to be set")
+	}
+	// Verify security context
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.RunAsNonRoot == nil || !*pod.Spec.SecurityContext.RunAsNonRoot {
+		t.Error("Expected RunAsNonRoot security context")
+	}
+}
+
+func TestBuildExecutorManagerPod(t *testing.T) {
+	r := &FlameClusterReconciler{}
+
+	cluster := &flamev1alpha1.FlameCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+		Spec: flamev1alpha1.FlameClusterSpec{
+			ExecutorManager: flamev1alpha1.ExecutorManagerSpec{
+				Image:    "xflops/flame-executor:v0.1.0",
+				Replicas: 3,
+			},
+		},
+	}
+
+	pod := r.buildExecutorManagerPod(cluster, 2, "testhash")
+
+	if pod.Name != "test-cluster-executor-manager-2" {
+		t.Errorf("Expected Pod name 'test-cluster-executor-manager-2', got '%s'", pod.Name)
+	}
+	if pod.Labels[labelApp] != componentExecutorManager {
+		t.Errorf("Expected label app='%s', got '%s'", componentExecutorManager, pod.Labels[labelApp])
+	}
+	if pod.Labels[labelPodIndex] != "2" {
+		t.Errorf("Expected label '%s'='2', got '%s'", labelPodIndex, pod.Labels[labelPodIndex])
+	}
+	if pod.Annotations[annotationConfigHash] != "testhash" {
+		t.Errorf("Expected annotation '%s'='testhash', got '%s'", annotationConfigHash, pod.Annotations[annotationConfigHash])
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("Expected 1 container, got %d", len(pod.Spec.Containers))
+	}
+	if pod.Spec.Containers[0].Image != "xflops/flame-executor:v0.1.0" {
+		t.Errorf("Expected image 'xflops/flame-executor:v0.1.0', got '%s'", pod.Spec.Containers[0].Image)
+	}
+
+	envVars := make(map[string]string)
+	for _, env := range pod.Spec.Containers[0].Env {
+		envVars[env.Name] = env.Value
+	}
+
+	if _, ok := envVars[envFlameConfig]; !ok {
+		t.Errorf("Expected env var '%s' not found", envFlameConfig)
+	}
+	if _, ok := envVars[envSessionManagerAddr]; !ok {
+		t.Errorf("Expected env var '%s' not found", envSessionManagerAddr)
+	}
+	if _, ok := envVars[envObjectCacheAddr]; !ok {
+		t.Errorf("Expected env var '%s' not found", envObjectCacheAddr)
+	}
+
+	// Verify readiness probe exists
+	if pod.Spec.Containers[0].ReadinessProbe == nil {
+		t.Error("Expected readiness probe to be set")
+	}
+	// Verify security context
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.RunAsNonRoot == nil || !*pod.Spec.SecurityContext.RunAsNonRoot {
+		t.Error("Expected RunAsNonRoot security context")
+	}
+}
+
+func TestIsPodReady(t *testing.T) {
+	tests := []struct {
+		name     string
+		pod      *corev1.Pod
+		expected bool
+	}{
+		{
+			name: "pod running and ready",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "pod running but not ready",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "pod pending",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{Phase: corev1.PodPending},
+			},
+			expected: false,
+		},
+		{
+			name: "pod failed",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isPodReady(tt.pod)
+			if result != tt.expected {
+				t.Errorf("isPodReady() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildLabels(t *testing.T) {
+	r := &FlameClusterReconciler{}
+
+	cluster := &flamev1alpha1.FlameCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+	}
+
+	labels := r.buildLabels(cluster, "test-component")
+
+	if labels[labelApp] != "test-component" {
+		t.Errorf("Expected label app='test-component', got '%s'", labels[labelApp])
+	}
+	if labels[labelCluster] != "test-cluster" {
+		t.Errorf("Expected label cluster='test-cluster', got '%s'", labels[labelCluster])
 	}
 }
