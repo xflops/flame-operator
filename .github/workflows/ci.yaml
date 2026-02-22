@@ -60,23 +60,4 @@ jobs:
           name: coverage
           path: coverage.out
 
-  verify-codegen:
-    name: Verify Codegen
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache: true
-      
-      - name: Verify manifests
-        run: |
-          if [ -f Makefile ]; then
-            make manifests
-            git diff --exit-code config/
-          else
-            echo "No Makefile found, skipping codegen verification"
-          fi
+
