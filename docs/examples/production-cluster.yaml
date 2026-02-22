@@ -1,0 +1,158 @@
+# Production FlameCluster Example
+#
+# This is a full-featured FlameCluster configuration suitable for production
+# environments. It includes resource limits, proper sizing, and all available
+# configuration options.
+#
+# Usage:
+#   kubectl apply -f production-cluster.yaml
+#
+# Prerequisites:
+#   - Dedicated namespace for isolation
+#   - Sufficient cluster resources (see resource requests below)
+#   - Network policies configured (if required)
+#
+# This configuration creates:
+#   - 1 Session Manager Pod with resource limits
+#   - 10 Executor Manager Pods with resource limits
+#   - Session Manager Service (ClusterIP)
+#   - Object Cache Service (ClusterIP)
+#   - Auto-generated ConfigMap with production settings
+#
+apiVersion: flame.xflops.io/v1alpha1
+kind: FlameCluster
+metadata:
+  # Use a descriptive name for production clusters
+  name: flame-production
+  # Deploy to a dedicated namespace for isolation
+  namespace: flame-production
+  # Labels for resource organization and monitoring
+  labels:
+    environment: production
+    team: data-platform
+    cost-center: analytics
+spec:
+  # ============================================================
+  # SESSION MANAGER CONFIGURATION
+  # ============================================================
+  # The Session Manager is the central coordinator. It handles:
+  # - Task scheduling and distribution
+  # - Cluster state management
+  # - Client session handling
+  #
+  sessionManager:
+    # Container image with explicit version tag
+    # Always pin versions in production for reproducibility
+    image: "xflops/flame-session:v0.1.0"
+    
+    # Resource requests and limits
+    # Adjust based on expected cluster size and workload
+    resources:
+      requests:
+        # Minimum resources guaranteed to the pod
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        # Maximum resources the pod can use
+        cpu: "2"
+        memory: "2Gi"
+    
+    # Resource slot definition for task scheduling
+    # This defines the resource unit for task allocation
+    # Format: "resource=value,resource=value"
+    # Example: "cpu=2,mem=4g" means each slot provides 2 CPU cores and 4GB memory
+    slot: "cpu=2,mem=4g"
+    
+    # Scheduling policy for task distribution
+    # Options:
+    #   - "priority": Tasks with higher priority are scheduled first
+    #   - "fifo": First-in-first-out scheduling
+    policy: priority
+    
+    # Storage backend for session state and metadata
+    # For production, consider using a persistent storage backend
+    # SQLite is shown here but may be replaced with PostgreSQL/MySQL
+    storage: sqlite://flame.db
+
+  # ============================================================
+  # EXECUTOR MANAGER CONFIGURATION
+  # ============================================================
+  # Executor Managers are workers that execute tasks. Scale these
+  # based on your workload requirements.
+  #
+  executorManager:
+    # Container image with explicit version tag
+    image: "xflops/flame-executor:v0.1.0"
+    
+    # Number of Executor Manager Pods
+    # Each pod can run multiple executors (up to maxExecutors)
+    # Total capacity = replicas × maxExecutors
+    # Example: 10 replicas × 20 maxExecutors = 200 concurrent executors
+    replicas: 10
+    
+    # Resource requests and limits per Executor Manager Pod
+    # Size appropriately for your workload
+    resources:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+    
+    # Executor shim type
+    # Determines how executors are spawned and managed
+    # Options:
+    #   - "host": Run executors directly on the host
+    #   - Other shim types may be available depending on version
+    shim: host
+    
+    # Maximum number of executors per Executor Manager Pod
+    # This limits concurrency per pod to prevent resource exhaustion
+    maxExecutors: 20
+
+  # ============================================================
+  # OBJECT CACHE CONFIGURATION
+  # ============================================================
+  # The Object Cache provides distributed caching for data objects,
+  # improving performance for repeated data access patterns.
+  #
+  objectCache:
+    # Network interface for cache communication
+    # Use the primary network interface of your nodes
+    # Common values: "eth0", "ens192", "bond0"
+    networkInterface: "eth0"
+    
+    # Local storage path for cached objects
+    # Ensure this path has sufficient space and I/O performance
+    # Consider using local SSDs for better cache performance
+    storage: "/var/lib/flame/cache"
+
+# ============================================================
+# NOTES FOR PRODUCTION DEPLOYMENT
+# ============================================================
+#
+# 1. NAMESPACE ISOLATION
+#    Create a dedicated namespace before applying:
+#    kubectl create namespace flame-production
+#
+# 2. RESOURCE PLANNING
+#    Total resources required for this configuration:
+#    - Session Manager: 0.5-2 CPU, 512Mi-2Gi memory
+#    - Executors: 20-40 CPU, 40-80Gi memory (10 pods × 2-4 CPU, 4-8Gi each)
+#    Ensure your cluster has sufficient capacity.
+#
+# 3. MONITORING
+#    Consider setting up monitoring for:
+#    - Pod health and restarts
+#    - Resource utilization
+#    - Task throughput and latency
+#
+# 4. SCALING
+#    To scale executor capacity:
+#    kubectl patch flamecluster flame-production -n flame-production \
+#      --type='merge' -p '{"spec":{"executorManager":{"replicas":15}}}'
+#
+# 5. UPDATES
+#    Configuration changes trigger automatic Pod recreation.
+#    Plan updates during maintenance windows for production clusters.

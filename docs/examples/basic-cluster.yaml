@@ -1,0 +1,63 @@
+# Basic FlameCluster Example
+#
+# This is a minimal FlameCluster configuration suitable for development
+# and testing environments. It creates a small cluster with default settings.
+#
+# Usage:
+#   kubectl apply -f basic-cluster.yaml
+#
+# This will create:
+#   - 1 Session Manager Pod
+#   - 3 Executor Manager Pods
+#   - Session Manager Service (ClusterIP)
+#   - Object Cache Service (ClusterIP)
+#   - Auto-generated ConfigMap
+#
+apiVersion: flame.xflops.io/v1alpha1
+kind: FlameCluster
+metadata:
+  # Cluster name - used as prefix for all created resources
+  # Resources created: my-flame-session-manager, my-flame-executor-manager-*, etc.
+  name: my-flame
+spec:
+  # Session Manager: Central coordinator for the Flame cluster
+  sessionManager:
+    # Container image (required)
+    # Use explicit version tags for reproducibility
+    image: "xflops/flame-session:v0.1.0"
+    
+    # Resource slot definition for scheduling
+    # Format: "resource=value,resource=value"
+    slot: "cpu=1,mem=1g"
+    
+    # Scheduling policy for task distribution
+    # Options: "priority", "fifo", etc.
+    policy: priority
+    
+    # Storage backend for session state
+    # SQLite is suitable for development/small clusters
+    storage: sqlite://flame.db
+
+  # Executor Manager: Workers that execute tasks
+  executorManager:
+    # Container image (required)
+    image: "xflops/flame-executor:v0.1.0"
+    
+    # Number of Executor Manager Pods to create
+    # Scale this based on your workload requirements
+    replicas: 3
+    
+    # Executor shim type
+    # "host" runs executors directly on the host
+    shim: host
+    
+    # Maximum number of executors per Executor Manager
+    maxExecutors: 10
+
+  # Object Cache: Distributed caching for the cluster
+  objectCache:
+    # Network interface for cache communication
+    networkInterface: "eth0"
+    
+    # Local storage path for cached objects
+    storage: "/var/lib/flame/cache"
