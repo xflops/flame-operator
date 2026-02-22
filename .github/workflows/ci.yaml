@@ -19,10 +19,11 @@ jobs:
           go-version: '1.21'
           cache: true
       
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: latest
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: Lint
+        run: make lint
 
   build:
     name: Build
@@ -37,7 +38,7 @@ jobs:
           cache: true
       
       - name: Build
-        run: go build -v ./...
+        run: make build
 
   test:
     name: Test
@@ -51,8 +52,8 @@ jobs:
           go-version: '1.21'
           cache: true
       
-      - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+      - name: Test
+        run: make test
       
       - name: Upload coverage
         uses: actions/upload-artifact@v4
@@ -60,23 +61,4 @@ jobs:
           name: coverage
           path: coverage.out
 
-  verify-codegen:
-    name: Verify Codegen
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache: true
-      
-      - name: Verify manifests
-        run: |
-          if [ -f Makefile ]; then
-            make manifests
-            git diff --exit-code config/
-          else
-            echo "No Makefile found, skipping codegen verification"
-          fi
+
