@@ -18,11 +18,42 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+
+// SlotSpec defines the resource slot for task scheduling.
+// Uses standard Kubernetes resource.Quantity for proper unit handling and validation.
+type SlotSpec struct {
+	// CPU is the CPU resource quantity for the slot.
+	// +optional
+	CPU resource.Quantity `json:"cpu,omitempty"`
+
+	// Memory is the memory resource quantity for the slot.
+	// +optional
+	Memory resource.Quantity `json:"memory,omitempty"`
+
+	// GPU is the GPU resource quantity for the slot.
+	// +optional
+	GPU resource.Quantity `json:"gpu,omitempty"`
+}
+
+// StorageConfig defines the storage backend configuration with secure credential handling.
+type StorageConfig struct {
+	// Type is the storage backend type (e.g., "sqlite", "postgres", "mysql").
+	Type string `json:"type"`
+
+	// SecretRef is a reference to a secret key containing the connection string or credentials.
+	// +optional
+	SecretRef *corev1.SecretKeySelector `json:"secretRef,omitempty"`
+
+	// Path is the filesystem path for file-based storage (e.g., SQLite).
+	// +optional
+	Path string `json:"path,omitempty"`
+}
 
 // FlameClusterSpec defines the desired state of FlameCluster
 type FlameClusterSpec struct {
@@ -47,15 +78,20 @@ type SessionManagerSpec struct {
 	// Resources defines the compute resource requirements.
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Slot defines the resource slot definition (e.g., "cpu=1,mem=1g").
-	Slot string `json:"slot,omitempty"`
+	// Slot defines the resource slot for task scheduling.
+	// +optional
+	Slot *SlotSpec `json:"slot,omitempty"`
 
-	// Policy defines the scheduling policy (e.g., "priority").
+	// Policy defines the scheduling policy.
+	// +kubebuilder:validation:Enum=priority;fifo;fair
+	// +optional
 	Policy string `json:"policy,omitempty"`
 
-	// Storage defines the storage backend URI (e.g., "sqlite://flame.db").
-	Storage string `json:"storage,omitempty"`
+	// Storage defines the storage backend configuration.
+	// +optional
+	Storage *StorageConfig `json:"storage,omitempty"`
 }
+
 
 // ExecutorManagerSpec defines the configuration for the executor manager
 type ExecutorManagerSpec struct {
@@ -69,7 +105,9 @@ type ExecutorManagerSpec struct {
 	// Resources defines the compute resource requirements.
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Shim defines the executor shim type (e.g., "host").
+	// Shim defines the executor shim type.
+	// +kubebuilder:validation:Enum=host;docker;kubernetes
+	// +optional
 	Shim string `json:"shim,omitempty"`
 
 	// MaxExecutors is the maximum number of executors per node.
@@ -82,8 +120,10 @@ type ObjectCacheSpec struct {
 	// NetworkInterface is the network interface to use for cache communication.
 	NetworkInterface string `json:"networkInterface,omitempty"`
 
-	// Storage defines the storage path for the cache.
-	Storage string `json:"storage,omitempty"`
+	// VolumeSource defines the storage volume for the cache.
+	// Supports EmptyDir, PVC, HostPath, etc. via standard Kubernetes VolumeSource.
+	// +optional
+	VolumeSource *corev1.VolumeSource `json:"volumeSource,omitempty"`
 }
 
 // FlameClusterStatus defines the observed state of FlameCluster
