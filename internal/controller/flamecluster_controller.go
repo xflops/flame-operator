@@ -18,7 +18,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -72,8 +76,12 @@ type CacheConfig struct {
 
 const (
 	// Label keys
-	labelApp     = "app"
-	labelCluster = "flame.xflops.io/cluster"
+	labelApp       = "app"
+	labelCluster   = "flame.xflops.io/cluster"
+	labelPodIndex  = "flame.xflops.io/pod-index"
+
+	// Annotation keys
+	annotationConfigHash = "flame.xflops.io/config-hash"
 
 	// Component names
 	componentSessionManager  = "flame-session-manager"
@@ -131,13 +139,14 @@ func (r *FlameClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 1. Reconcile ConfigMap
-	if err := r.reconcileConfigMap(ctx, &flameCluster); err != nil {
+	configHash, err := r.reconcileConfigMap(ctx, &flameCluster)
+	if err != nil {
 		logger.Error(err, "Failed to reconcile ConfigMap")
 		return r.updateStatusWithError(ctx, &flameCluster, "Failed", fmt.Sprintf("ConfigMap error: %v", err))
 	}
 
 	// 2. Reconcile Session Manager Service and Pod
-	if err := r.reconcileSessionManager(ctx, &flameCluster); err != nil {
+	if err := r.reconcileSessionManager(ctx, &flameCluster, configHash); err != nil {
 		logger.Error(err, "Failed to reconcile Session Manager")
 		return r.updateStatusWithError(ctx, &flameCluster, "Failed", fmt.Sprintf("Session Manager error: %v", err))
 	}
@@ -149,7 +158,7 @@ func (r *FlameClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 4. Reconcile Executor Manager Pods
-	if err := r.reconcileExecutorManager(ctx, &flameCluster); err != nil {
+	if err := r.reconcileExecutorManager(ctx, &flameCluster, configHash); err != nil {
 		logger.Error(err, "Failed to reconcile Executor Manager")
 		return r.updateStatusWithError(ctx, &flameCluster, "Failed", fmt.Sprintf("Executor Manager error: %v", err))
 	}
@@ -172,7 +181,17 @@ func (r *FlameClusterReconciler) validateSpec(cluster *flamev1alpha1.FlameCluste
 	if cluster.Spec.ExecutorManager.Image == "" {
 		return fmt.Errorf("spec.executorManager.image is required")
 	}
+	// Fix #6: Validate replicas > 0
+	if cluster.Spec.ExecutorManager.Replicas <= 0 {
+		return fmt.Errorf("spec.executorManager.replicas must be greater than 0")
+	}
 	return nil
+}
+
+// computeConfigHash computes a SHA256 hash of the ConfigMap data for change detection
+func computeConfigHash(data string) string {
+	hash := sha256.Sum256([]byte(data))
+	return fmt.Sprintf("%x", hash[:8]) // Use first 8 bytes for brevity
 }
 
 // ============================================================================
@@ -180,13 +199,15 @@ func (r *FlameClusterReconciler) validateSpec(cluster *flamev1alpha1.FlameCluste
 // ============================================================================
 
 // reconcileConfigMap creates or updates the ConfigMap with cluster configuration
-func (r *FlameClusterReconciler) reconcileConfigMap(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
+// Returns the config hash for pod annotation
+func (r *FlameClusterReconciler) reconcileConfigMap(ctx context.Context, cluster *flamev1alpha1.FlameCluster) (string, error) {
 	logger := log.FromContext(ctx)
 	configMap := r.buildConfigMap(cluster)
+	configHash := computeConfigHash(configMap.Data[configMapKey])
 
 	// Set owner reference for garbage collection
 	if err := controllerutil.SetControllerReference(cluster, configMap, r.Scheme); err != nil {
-		return fmt.Errorf("failed to set owner reference: %w", err)
+		return "", fmt.Errorf("failed to set owner reference: %w", err)
 	}
 
 	// Create or update
@@ -195,19 +216,19 @@ func (r *FlameClusterReconciler) reconcileConfigMap(ctx context.Context, cluster
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("Creating ConfigMap", "name", configMap.Name)
-			return r.Create(ctx, configMap)
+			return configHash, r.Create(ctx, configMap)
 		}
-		return err
+		return "", err
 	}
 
 	// Update if data changed
 	if existing.Data[configMapKey] != configMap.Data[configMapKey] {
 		logger.Info("Updating ConfigMap", "name", configMap.Name)
 		existing.Data = configMap.Data
-		return r.Update(ctx, existing)
+		return configHash, r.Update(ctx, existing)
 	}
 
-	return nil
+	return configHash, nil
 }
 
 // buildConfigMap constructs the ConfigMap from FlameCluster spec using type-safe FlameConfigYaml
@@ -228,10 +249,7 @@ func (r *FlameClusterReconciler) buildConfigMap(cluster *flamev1alpha1.FlameClus
 }
 
 // buildFlameConfigYaml creates a FlameConfigYaml struct from the FlameCluster spec.
-// This builds the configuration in the format expected by Flame:
-// https://raw.githubusercontent.com/xflops/flame/refs/heads/main/ci/flame-cluster.yaml
 func (r *FlameClusterReconciler) buildFlameConfigYaml(cluster *flamev1alpha1.FlameCluster) *FlameConfigYaml {
-	// Build service endpoints based on naming convention
 	sessionManagerEndpoint := fmt.Sprintf("http://%s-session-manager:%d", cluster.Name, sessionManagerPort)
 	cacheEndpoint := fmt.Sprintf("grpc://%s-object-cache:%d", cluster.Name, objectCachePort)
 
@@ -256,7 +274,6 @@ func (r *FlameClusterReconciler) buildFlameConfigYaml(cluster *flamev1alpha1.Fla
 		},
 	}
 
-	// Set default max executors if not specified
 	if config.Executors.Limits.MaxExecutors == 0 {
 		config.Executors.Limits.MaxExecutors = 1
 	}
@@ -265,7 +282,6 @@ func (r *FlameClusterReconciler) buildFlameConfigYaml(cluster *flamev1alpha1.Fla
 }
 
 // marshalFlameConfig serializes the FlameConfigYaml to YAML bytes.
-// Returns the YAML content suitable for ConfigMap data.
 func (r *FlameClusterReconciler) marshalFlameConfig(config *FlameConfigYaml) ([]byte, error) {
 	return yaml.Marshal(config)
 }
@@ -274,22 +290,16 @@ func (r *FlameClusterReconciler) marshalFlameConfig(config *FlameConfigYaml) ([]
 // Session Manager Reconciliation
 // ============================================================================
 
-// reconcileSessionManager ensures the Session Manager Service and Pod exist
-func (r *FlameClusterReconciler) reconcileSessionManager(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
-	// First, create the Service
+func (r *FlameClusterReconciler) reconcileSessionManager(ctx context.Context, cluster *flamev1alpha1.FlameCluster, configHash string) error {
 	if err := r.reconcileSessionManagerService(ctx, cluster); err != nil {
 		return fmt.Errorf("failed to reconcile service: %w", err)
 	}
-
-	// Then, create the Pod
-	if err := r.reconcileSessionManagerPod(ctx, cluster); err != nil {
+	if err := r.reconcileSessionManagerPod(ctx, cluster, configHash); err != nil {
 		return fmt.Errorf("failed to reconcile pod: %w", err)
 	}
-
 	return nil
 }
 
-// reconcileSessionManagerService creates or updates the Session Manager Service
 func (r *FlameClusterReconciler) reconcileSessionManagerService(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
 	logger := log.FromContext(ctx)
 	service := r.buildSessionManagerService(cluster)
@@ -307,12 +317,9 @@ func (r *FlameClusterReconciler) reconcileSessionManagerService(ctx context.Cont
 		}
 		return err
 	}
-
-	// Service exists, no update needed for ClusterIP services
 	return nil
 }
 
-// buildSessionManagerService constructs the Session Manager Service
 func (r *FlameClusterReconciler) buildSessionManagerService(cluster *flamev1alpha1.FlameCluster) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -338,10 +345,9 @@ func (r *FlameClusterReconciler) buildSessionManagerService(cluster *flamev1alph
 	}
 }
 
-// reconcileSessionManagerPod creates or updates the Session Manager Pod
-func (r *FlameClusterReconciler) reconcileSessionManagerPod(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
+func (r *FlameClusterReconciler) reconcileSessionManagerPod(ctx context.Context, cluster *flamev1alpha1.FlameCluster, configHash string) error {
 	logger := log.FromContext(ctx)
-	pod := r.buildSessionManagerPod(cluster)
+	pod := r.buildSessionManagerPod(cluster, configHash)
 
 	if err := controllerutil.SetControllerReference(cluster, pod, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set owner reference: %w", err)
@@ -366,10 +372,24 @@ func (r *FlameClusterReconciler) reconcileSessionManagerPod(ctx context.Context,
 		return r.Create(ctx, pod)
 	}
 
-	// Pod exists - check if it needs recreation (image changed)
+	// Check if pod needs recreation (image changed or config changed)
+	needsRecreation := false
+	reason := ""
+
 	if existing.Spec.Containers[0].Image != cluster.Spec.SessionManager.Image {
-		logger.Info("Recreating Session Manager Pod due to image change", "name", pod.Name)
-		if err := r.Delete(ctx, existing); err != nil {
+		needsRecreation = true
+		reason = "image change"
+	}
+
+	// Fix #5: Check config hash annotation for config changes
+	if existing.Annotations[annotationConfigHash] != configHash {
+		needsRecreation = true
+		reason = "config change"
+	}
+
+	if needsRecreation {
+		logger.Info("Recreating Session Manager Pod", "name", pod.Name, "reason", reason)
+		if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 		return r.Create(ctx, pod)
@@ -378,9 +398,13 @@ func (r *FlameClusterReconciler) reconcileSessionManagerPod(ctx context.Context,
 	return nil
 }
 
-// buildSessionManagerPod constructs the Session Manager Pod
-func (r *FlameClusterReconciler) buildSessionManagerPod(cluster *flamev1alpha1.FlameCluster) *corev1.Pod {
+func (r *FlameClusterReconciler) buildSessionManagerPod(cluster *flamev1alpha1.FlameCluster, configHash string) *corev1.Pod {
 	configMapName := fmt.Sprintf("%s-config", cluster.Name)
+
+	// Fix #4: Non-root security context
+	runAsNonRoot := true
+	runAsUser := int64(1000)
+	fsGroup := int64(1000)
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -390,8 +414,16 @@ func (r *FlameClusterReconciler) buildSessionManagerPod(cluster *flamev1alpha1.F
 				labelApp:     componentSessionManager,
 				labelCluster: cluster.Name,
 			},
+			Annotations: map[string]string{
+				annotationConfigHash: configHash,
+			},
 		},
 		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: &runAsNonRoot,
+				RunAsUser:    &runAsUser,
+				FSGroup:      &fsGroup,
+			},
 			Containers: []corev1.Container{
 				{
 					Name:      "session-manager",
@@ -417,6 +449,33 @@ func (r *FlameClusterReconciler) buildSessionManagerPod(cluster *flamev1alpha1.F
 							ReadOnly:  true,
 						},
 					},
+					// Fix #3: Readiness probe (required by HLD)
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/healthz",
+								Port: intstr.FromInt(sessionManagerPort),
+							},
+						},
+						InitialDelaySeconds: 5,
+						PeriodSeconds:       10,
+						TimeoutSeconds:      5,
+						SuccessThreshold:    1,
+						FailureThreshold:    3,
+					},
+					LivenessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/healthz",
+								Port: intstr.FromInt(sessionManagerPort),
+							},
+						},
+						InitialDelaySeconds: 15,
+						PeriodSeconds:       20,
+						TimeoutSeconds:      5,
+						SuccessThreshold:    1,
+						FailureThreshold:    3,
+					},
 				},
 			},
 			Volumes: []corev1.Volume{
@@ -439,7 +498,6 @@ func (r *FlameClusterReconciler) buildSessionManagerPod(cluster *flamev1alpha1.F
 // Object Cache Service Reconciliation
 // ============================================================================
 
-// reconcileObjectCacheService creates or updates the Object Cache Service
 func (r *FlameClusterReconciler) reconcileObjectCacheService(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
 	logger := log.FromContext(ctx)
 	service := r.buildObjectCacheService(cluster)
@@ -457,12 +515,9 @@ func (r *FlameClusterReconciler) reconcileObjectCacheService(ctx context.Context
 		}
 		return err
 	}
-
 	return nil
 }
 
-// buildObjectCacheService constructs the Object Cache Service
-// Per HLD, the Object Cache Service routes to Executor Manager pods
 func (r *FlameClusterReconciler) buildObjectCacheService(cluster *flamev1alpha1.FlameCluster) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -492,12 +547,10 @@ func (r *FlameClusterReconciler) buildObjectCacheService(cluster *flamev1alpha1.
 // Executor Manager Reconciliation
 // ============================================================================
 
-// reconcileExecutorManager ensures the correct number of Executor Manager Pods exist
-func (r *FlameClusterReconciler) reconcileExecutorManager(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
+func (r *FlameClusterReconciler) reconcileExecutorManager(ctx context.Context, cluster *flamev1alpha1.FlameCluster, configHash string) error {
 	logger := log.FromContext(ctx)
 	desiredReplicas := int(cluster.Spec.ExecutorManager.Replicas)
 
-	// List existing executor pods
 	existingPods := &corev1.PodList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(cluster.Namespace),
@@ -514,75 +567,128 @@ func (r *FlameClusterReconciler) reconcileExecutorManager(ctx context.Context, c
 	currentCount := len(existingPods.Items)
 	logger.Info("Executor Manager reconciliation", "current", currentCount, "desired", desiredReplicas)
 
-	// Scale up: Create missing pods
-	if currentCount < desiredReplicas {
-		for i := currentCount; i < desiredReplicas; i++ {
-			pod := r.buildExecutorManagerPod(cluster, i)
-			if err := controllerutil.SetControllerReference(cluster, pod, r.Scheme); err != nil {
-				return fmt.Errorf("failed to set owner reference: %w", err)
+	// Fix #2: Build a map of existing pod indices to handle non-contiguous indices
+	existingIndices := make(map[int]corev1.Pod)
+	for _, pod := range existingPods.Items {
+		if idx, ok := pod.Labels[labelPodIndex]; ok {
+			if index, err := strconv.Atoi(idx); err == nil {
+				existingIndices[index] = pod
 			}
-			logger.Info("Creating Executor Manager Pod", "name", pod.Name)
-			if err := r.Create(ctx, pod); err != nil {
-				if !errors.IsAlreadyExists(err) {
-					return err
+		} else {
+			// Fallback: extract index from pod name for backwards compatibility
+			parts := strings.Split(pod.Name, "-")
+			if len(parts) > 0 {
+				if index, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+					existingIndices[index] = pod
 				}
 			}
 		}
 	}
 
-	// Scale down: Delete excess pods
-	if currentCount > desiredReplicas {
-		// Delete pods in reverse order (highest index first)
-		for i := currentCount - 1; i >= desiredReplicas; i-- {
-			podName := fmt.Sprintf("%s-executor-manager-%d", cluster.Name, i)
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      podName,
-					Namespace: cluster.Namespace,
-				},
-			}
-			logger.Info("Deleting Executor Manager Pod", "name", podName)
-			if err := r.Delete(ctx, pod); err != nil {
-				if !errors.IsNotFound(err) {
-					return err
-				}
+	// Find which indices need to be created (fill gaps first, then extend)
+	var indicesToCreate []int
+	for i := 0; i < desiredReplicas; i++ {
+		if _, exists := existingIndices[i]; !exists {
+			indicesToCreate = append(indicesToCreate, i)
+		}
+	}
+
+	// Create missing pods
+	for _, idx := range indicesToCreate {
+		pod := r.buildExecutorManagerPod(cluster, idx, configHash)
+		if err := controllerutil.SetControllerReference(cluster, pod, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set owner reference: %w", err)
+		}
+		logger.Info("Creating Executor Manager Pod", "name", pod.Name, "index", idx)
+		if err := r.Create(ctx, pod); err != nil {
+			if !errors.IsAlreadyExists(err) {
+				return err
 			}
 		}
 	}
 
-	// Check for image updates on existing pods
-	for _, existingPod := range existingPods.Items {
-		if len(existingPod.Spec.Containers) > 0 &&
-			existingPod.Spec.Containers[0].Image != cluster.Spec.ExecutorManager.Image {
-			logger.Info("Recreating Executor Manager Pod due to image change", "name", existingPod.Name)
+	// Scale down: Delete pods with indices >= desiredReplicas
+	var indicesToDelete []int
+	for idx := range existingIndices {
+		if idx >= desiredReplicas {
+			indicesToDelete = append(indicesToDelete, idx)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(indicesToDelete)))
+
+	for _, idx := range indicesToDelete {
+		pod := existingIndices[idx]
+		logger.Info("Deleting Executor Manager Pod", "name", pod.Name, "index", idx)
+		if err := r.Delete(ctx, &pod); err != nil {
+			if !errors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+
+	// Check for image/config updates on existing pods (within desired range)
+	for idx, existingPod := range existingIndices {
+		if idx >= desiredReplicas {
+			continue
+		}
+
+		needsRecreation := false
+		reason := ""
+
+		if len(existingPod.Spec.Containers) == 0 {
+			needsRecreation = true
+			reason = "no containers"
+		} else if existingPod.Spec.Containers[0].Image != cluster.Spec.ExecutorManager.Image {
+			needsRecreation = true
+			reason = "image change"
+		}
+
+		if existingPod.Annotations[annotationConfigHash] != configHash {
+			needsRecreation = true
+			reason = "config change"
+		}
+
+		if needsRecreation {
+			logger.Info("Recreating Executor Manager Pod", "name", existingPod.Name, "reason", reason)
 			if err := r.Delete(ctx, &existingPod); err != nil {
 				if !errors.IsNotFound(err) {
 					return err
 				}
 			}
-			// Pod will be recreated in next reconciliation
 		}
 	}
 
 	return nil
 }
 
-// buildExecutorManagerPod constructs an Executor Manager Pod
-func (r *FlameClusterReconciler) buildExecutorManagerPod(cluster *flamev1alpha1.FlameCluster, index int) *corev1.Pod {
+func (r *FlameClusterReconciler) buildExecutorManagerPod(cluster *flamev1alpha1.FlameCluster, index int, configHash string) *corev1.Pod {
 	configMapName := fmt.Sprintf("%s-config", cluster.Name)
 	sessionManagerAddr := fmt.Sprintf("%s-session-manager:%d", cluster.Name, sessionManagerPort)
 	objectCacheAddr := fmt.Sprintf("%s-object-cache:%d", cluster.Name, objectCachePort)
+
+	runAsNonRoot := true
+	runAsUser := int64(1000)
+	fsGroup := int64(1000)
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-executor-manager-%d", cluster.Name, index),
 			Namespace: cluster.Namespace,
 			Labels: map[string]string{
-				labelApp:     componentExecutorManager,
-				labelCluster: cluster.Name,
+				labelApp:      componentExecutorManager,
+				labelCluster:  cluster.Name,
+				labelPodIndex: strconv.Itoa(index),
+			},
+			Annotations: map[string]string{
+				annotationConfigHash: configHash,
 			},
 		},
 		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: &runAsNonRoot,
+				RunAsUser:    &runAsUser,
+				FSGroup:      &fsGroup,
+			},
 			Containers: []corev1.Container{
 				{
 					Name:      "executor-manager",
@@ -616,6 +722,30 @@ func (r *FlameClusterReconciler) buildExecutorManagerPod(cluster *flamev1alpha1.
 							ReadOnly:  true,
 						},
 					},
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							TCPSocket: &corev1.TCPSocketAction{
+								Port: intstr.FromInt(objectCachePort),
+							},
+						},
+						InitialDelaySeconds: 5,
+						PeriodSeconds:       10,
+						TimeoutSeconds:      5,
+						SuccessThreshold:    1,
+						FailureThreshold:    3,
+					},
+					LivenessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							TCPSocket: &corev1.TCPSocketAction{
+								Port: intstr.FromInt(objectCachePort),
+							},
+						},
+						InitialDelaySeconds: 15,
+						PeriodSeconds:       20,
+						TimeoutSeconds:      5,
+						SuccessThreshold:    1,
+						FailureThreshold:    3,
+					},
 				},
 			},
 			Volumes: []corev1.Volume{
@@ -638,11 +768,9 @@ func (r *FlameClusterReconciler) buildExecutorManagerPod(cluster *flamev1alpha1.
 // Status Update
 // ============================================================================
 
-// updateStatus aggregates Pod status and updates FlameCluster.Status using Patch
 func (r *FlameClusterReconciler) updateStatus(ctx context.Context, cluster *flamev1alpha1.FlameCluster) error {
 	logger := log.FromContext(ctx)
 
-	// Get Session Manager Pod status
 	smPod := &corev1.Pod{}
 	smPodName := fmt.Sprintf("%s-session-manager", cluster.Name)
 	smReady := int32(0)
@@ -652,7 +780,6 @@ func (r *FlameClusterReconciler) updateStatus(ctx context.Context, cluster *flam
 		}
 	}
 
-	// Get Executor Manager Pods status
 	executorPods := &corev1.PodList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(cluster.Namespace),
@@ -671,7 +798,6 @@ func (r *FlameClusterReconciler) updateStatus(ctx context.Context, cluster *flam
 		}
 	}
 
-	// Determine overall state
 	state := "Pending"
 	message := "Waiting for components to be ready"
 
@@ -686,10 +812,8 @@ func (r *FlameClusterReconciler) updateStatus(ctx context.Context, cluster *flam
 		message = fmt.Sprintf("Waiting for Executor Managers (0/%d ready)", cluster.Spec.ExecutorManager.Replicas)
 	}
 
-	// Create a patch from the current state (better conflict handling)
 	patch := client.MergeFrom(cluster.DeepCopy())
 
-	// Update status fields
 	cluster.Status.SessionManager.Ready = smReady
 	cluster.Status.SessionManager.Endpoint = fmt.Sprintf("http://%s-session-manager:%d", cluster.Name, sessionManagerPort)
 	cluster.Status.ExecutorManager.Replicas = cluster.Spec.ExecutorManager.Replicas
@@ -702,23 +826,14 @@ func (r *FlameClusterReconciler) updateStatus(ctx context.Context, cluster *flam
 	return r.Status().Patch(ctx, cluster, patch)
 }
 
-// updateStatusWithPatch updates the FlameCluster status using Patch instead of Update.
-// Using Patch with MergeFrom is more resilient to concurrent modifications
-// and reduces conflict errors in high-concurrency scenarios.
 func (r *FlameClusterReconciler) updateStatusWithPatch(ctx context.Context, cluster *flamev1alpha1.FlameCluster, state, message string) error {
-	// Create a patch from the current state
 	patch := client.MergeFrom(cluster.DeepCopy())
-
-	// Update status fields
 	cluster.Status.State = state
 	cluster.Status.Message = message
 	cluster.Status.ObservedGeneration = cluster.Generation
-
-	// Apply the patch - only updates changed fields
 	return r.Status().Patch(ctx, cluster, patch)
 }
 
-// updateStatusWithError updates the FlameCluster status with an error state
 func (r *FlameClusterReconciler) updateStatusWithError(ctx context.Context, cluster *flamev1alpha1.FlameCluster, state, message string) (ctrl.Result, error) {
 	if err := r.updateStatusWithPatch(ctx, cluster, state, message); err != nil {
 		return ctrl.Result{}, err
@@ -730,7 +845,6 @@ func (r *FlameClusterReconciler) updateStatusWithError(ctx context.Context, clus
 // Helper Functions
 // ============================================================================
 
-// buildLabels creates standard labels for resources
 func (r *FlameClusterReconciler) buildLabels(cluster *flamev1alpha1.FlameCluster, component string) map[string]string {
 	return map[string]string{
 		labelApp:     component,
@@ -738,7 +852,6 @@ func (r *FlameClusterReconciler) buildLabels(cluster *flamev1alpha1.FlameCluster
 	}
 }
 
-// isPodReady checks if a Pod is in Ready condition
 func isPodReady(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning {
 		return false
