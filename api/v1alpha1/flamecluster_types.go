@@ -44,7 +44,7 @@ type SlotSpec struct {
 // StorageConfig defines the storage backend configuration with secure credential handling.
 type StorageConfig struct {
 	// Type is the storage backend type (e.g., "sqlite", "postgres", "mysql").
-	Type string `json:"type"`
+	// +kubebuilder:validation:Enum=sqlite;postgres;mysqlntType string `json:"type"`
 
 	// SecretRef is a reference to a secret key containing the connection string or credentials.
 	// +optional
